@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from ml.risk_aggregator import calculate_composite_risk_score
 from ml.graph_builder import graph_builder
-from agent.graph_agent import investigation_agent
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger, bind_correlation_id, clear_correlation_id
 
@@ -49,11 +48,12 @@ def score_transaction(payload: TransactionPayload):
         # 1. Compute Composite Risk Score
         risk_res = calculate_composite_risk_score(txn_dict)
 
-        # 2. Automatically Trigger Agentic Investigation if High Risk (>= 70)
-        investigation_res = None
-        if risk_res["risk_score"] >= 70.0:
-            logger.info(f"High risk score ({risk_res['risk_score']}) detected for {txn_id}. Dispatching LangGraph Investigation Agent...")
-            investigation_res = investigation_agent.investigate(txn_dict, risk_res)
+        # 2. High-risk transactions (>= 70) need an investigation, but that
+        # can involve a real LLM call and take several seconds — it's run
+        # as a separate follow-up request (POST /api/v1/investigations/run/{id})
+        # from the frontend so the risk score itself renders instantly instead
+        # of the whole scoring UI blocking on the slower agent step.
+        needs_investigation = risk_res["risk_score"] >= 70.0
 
         # 3. Persist to Database
         conn = get_raw_sqlite_connection()
@@ -89,18 +89,6 @@ def score_transaction(payload: TransactionPayload):
             risk_res["gnn_score"], risk_res["velocity_multiplier"], risk_res["risk_tier"], risk_res["decision"]
         ))
 
-        # Insert Investigation Report if generated
-        if investigation_res:
-            cursor.execute("""
-                INSERT INTO investigation_reports
-                (investigation_id, transaction_id, risk_score, evidence_json, fraud_hypothesis, recommended_action, summary_report)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                investigation_res["investigation_id"], txn_id, risk_res["risk_score"],
-                json.dumps(investigation_res["evidence"]), investigation_res["fraud_hypothesis"],
-                investigation_res["recommended_action"], investigation_res["summary_report"]
-            ))
-
         conn.commit()
         conn.close()
 
@@ -118,7 +106,7 @@ def score_transaction(payload: TransactionPayload):
             "user_id": payload.user_id,
             "amount": payload.amount,
             "risk_evaluation": risk_res,
-            "agent_investigation": investigation_res,
+            "needs_investigation": needs_investigation,
             "correlation_id": corr_id
         }
     except Exception as e:

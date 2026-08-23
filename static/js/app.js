@@ -3,7 +3,7 @@
 // hitting the bug ever sees — best-effort, never throws itself.
 function logClientError(message, context) {
     try {
-        fetch('/api/v1/logs/client', {
+        fetch(`${API_BASE}/api/v1/logs/client`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ level: 'error', message: String(message).slice(0, 500), context })
@@ -12,6 +12,11 @@ function logClientError(message, context) {
 }
 window.addEventListener('error', (e) => logClientError(e.message, 'window.onerror'));
 window.addEventListener('unhandledrejection', (e) => logClientError(e.reason, 'unhandledrejection'));
+
+// API_BASE is same-origin ("") when this dashboard is served by the FastAPI
+// backend itself (Render, local dev). window.RAZORRISK_API_BASE is set in
+// index.html — override it there when deploying static/ standalone (Vercel).
+const API_BASE = window.RAZORRISK_API_BASE || '';
 
 document.addEventListener('DOMContentLoaded', () => {
     initTabs();
@@ -112,28 +117,40 @@ function handleTransactionScore(e) {
         is_suspicious_proxy: document.getElementById('is_suspicious_proxy').checked
     };
 
-    fetch('/api/v1/transactions/score', {
+    fetch(`${API_BASE}/api/v1/transactions/score`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
     })
     .then(res => res.json())
     .then(data => {
+        // Risk score renders the moment it's back — it no longer waits on
+        // the (potentially several-seconds, LLM-backed) investigation step.
         btn.innerText = 'Score Transaction & Run AI Engine';
         btn.disabled = false;
-
         updateRiskDisplay(data.risk_evaluation);
+        loadStats();
 
-        if (data.agent_investigation) {
-            renderAgentReport(data.agent_investigation);
+        if (data.needs_investigation) {
+            document.getElementById('agent-report-container').innerHTML = `
+                <div class="placeholder-msg">Running agent investigation…</div>`;
+            fetch(`${API_BASE}/api/v1/investigations/run/${data.transaction_id}`, { method: 'POST' })
+                .then(res => {
+                    if (!res.ok) throw new Error(`Investigation request failed (HTTP ${res.status})`);
+                    return res.json();
+                })
+                .then(investigationRes => renderAgentReport(investigationRes))
+                .catch(err => {
+                    console.error("Investigation error:", err);
+                    document.getElementById('agent-report-container').innerHTML = `
+                        <div class="placeholder-msg">Couldn't complete the investigation: ${err.message}</div>`;
+                });
         } else {
             document.getElementById('agent-report-container').innerHTML = `
                 <div class="placeholder-msg">
                     Risk score ${data.risk_evaluation.risk_score} is below the investigation threshold (70.0) — approved automatically, no agent report generated.
                 </div>`;
         }
-
-        loadStats();
     })
     .catch(err => {
         btn.innerText = 'Score Transaction & Run AI Engine';
@@ -173,12 +190,18 @@ function updateRiskDisplay(evalRes) {
 
 function renderAgentReport(agentRes) {
     const container = document.getElementById('agent-report-container');
+    // agentRes.summary_report is raw Markdown (agent/prompts.py REPORT_TEMPLATE).
+    // marked.js converts it to HTML; if the CDN script didn't load for any
+    // reason, fall back to plain text instead of throwing "marked is not defined".
     if (typeof marked !== 'undefined') {
         container.innerHTML = marked.parse(agentRes.summary_report);
     } else {
         console.error("marked.js failed to load — showing raw markdown as plain text.");
         container.innerText = agentRes.summary_report;
     }
+    // Reflect the mode that ACTUALLY ran for this specific report — not
+    // just the general "what would run next" status — so the badge never
+    // implies more than the report it's sitting next to actually did.
     setAgentBadge(agentRes.agent_mode_label || agentRes.agent_mode, agentRes.agent_mode);
 }
 
@@ -194,7 +217,7 @@ function setAgentBadge(label, modeKey) {
 }
 
 function loadAgentStatus() {
-    fetch('/api/v1/investigations/agent-status')
+    fetch(`${API_BASE}/api/v1/investigations/agent-status`)
         .then(res => res.json())
         .then(data => {
             const select = document.getElementById('agent-mode-select');
@@ -223,7 +246,7 @@ function setAgentMode(mode) {
     const select = document.getElementById('agent-mode-select');
     if (select) select.disabled = true;
 
-    fetch('/api/v1/investigations/agent-mode', {
+    fetch(`${API_BASE}/api/v1/investigations/agent-mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode })
@@ -251,7 +274,7 @@ function runDataPipeline(mode) {
     const statusEl = document.getElementById('pipeline-status');
     const synthBtn = document.getElementById('btn-seed-synthetic');
     const realBtn = document.getElementById('btn-seed-real');
-    const endpoint = mode === 'real' ? '/api/v1/admin/pipeline/real' : '/api/v1/admin/pipeline/synthetic';
+    const endpoint = mode === 'real' ? `${API_BASE}/api/v1/admin/pipeline/real` : `${API_BASE}/api/v1/admin/pipeline/synthetic`;
     const label = mode === 'real' ? 'Downloading real Kaggle dataset & retraining models…' : 'Regenerating synthetic data & retraining models…';
 
     statusEl.textContent = label;
@@ -294,7 +317,7 @@ function runDataPipeline(mode) {
 }
 
 function loadStats() {
-    fetch('/api/v1/stats')
+    fetch(`${API_BASE}/api/v1/stats`)
         .then(res => res.json())
         .then(data => {
             document.getElementById('stat-total-txns').innerText = data.total_transactions;
@@ -305,7 +328,7 @@ function loadStats() {
 }
 
 function loadRecentTransactions() {
-    fetch('/api/v1/transactions/recent?limit=15')
+    fetch(`${API_BASE}/api/v1/transactions/recent?limit=15`)
         .then(res => res.json())
         .then(data => {
             const tbody = document.getElementById('txns-table-body');
@@ -334,7 +357,7 @@ function loadRecentTransactions() {
 }
 
 function refreshLogStream() {
-    fetch('/api/v1/logs/stream?lines=25')
+    fetch(`${API_BASE}/api/v1/logs/stream?lines=25`)
         .then(res => res.json())
         .then(data => {
             document.getElementById('log-risk-engine').innerText = data.risk_engine_logs.join('\n');
