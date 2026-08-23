@@ -20,10 +20,19 @@ DATABASE_LOG_PATH = LOG_DIR / "database.log"
 PIPELINE_LOG_PATH = LOG_DIR / "pipeline.log"
 FRONTEND_LOG_PATH = LOG_DIR / "frontend_client.log"
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") # reserved, not currently used
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+# Per-provider model overrides (agent/llm_investigator.py). Defaults are
+# current, non-deprecated production models as of Aug 2026 — Groq retired
+# llama-3.1/3.3-versatile from its free/developer tier in June 2026, so
+# openai/gpt-oss-120b (Groq's recommended migration target) is the default
+# rather than the older Llama name.
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
