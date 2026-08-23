@@ -218,7 +218,13 @@
                 <div class="card">
                     <div class="card-header">
                         <h3>LangGraph agentic investigation output</h3>
-                        <span class="agent-status-badge">Agent active</span>
+                        <div class="agent-mode-controls">
+                            <label for="agent-mode-select" class="agent-mode-label">Agent mode</label>
+                            <select id="agent-mode-select" class="agent-mode-select" onchange="setAgentMode(this.value)">
+                                <option value="auto">Loading…</option>
+                            </select>
+                            <span id="agent-status-badge" class="agent-status-badge">Checking…</span>
+                        </div>
                     </div>
                     <div id="agent-report-container" class="markdown-report-box">
                         <div class="placeholder-msg">Submit a high-risk transaction (risk score ≥ 70) to see the agent's investigation report here.</div>
