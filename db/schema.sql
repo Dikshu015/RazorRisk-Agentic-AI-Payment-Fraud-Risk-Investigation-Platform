@@ -1,0 +1,84 @@
+-- RazorRisk SQLite & PostgreSQL Schema Definition
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id VARCHAR(50) PRIMARY KEY,
+    name VARCHAR(100),
+    email VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    account_status VARCHAR(20) DEFAULT 'ACTIVE'
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+    device_id VARCHAR(50) PRIMARY KEY,
+    device_type VARCHAR(50),
+    os VARCHAR(50),
+    is_vpn_proxy BOOLEAN DEFAULT FALSE,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ip_addresses (
+    ip_address VARCHAR(45) PRIMARY KEY,
+    country VARCHAR(50),
+    city VARCHAR(50),
+    isp VARCHAR(100),
+    is_suspicious_proxy BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS merchants (
+    merchant_id VARCHAR(50) PRIMARY KEY,
+    name VARCHAR(100),
+    category VARCHAR(50),
+    fraud_rate FLOAT DEFAULT 0.01,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    transaction_id VARCHAR(50) PRIMARY KEY,
+    user_id VARCHAR(50) REFERENCES users(user_id),
+    device_id VARCHAR(50) REFERENCES devices(device_id),
+    ip_address VARCHAR(45) REFERENCES ip_addresses(ip_address),
+    merchant_id VARCHAR(50) REFERENCES merchants(merchant_id),
+    amount FLOAT NOT NULL,
+    currency VARCHAR(10) DEFAULT 'INR',
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'COMPLETED',
+    velocity_1h INT DEFAULT 1,
+    amount_zscore_prior FLOAT DEFAULT 0.0,
+    is_fraud_ground_truth BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS risk_scores (
+    scoring_id VARCHAR(50) PRIMARY KEY,
+    transaction_id VARCHAR(50) REFERENCES transactions(transaction_id),
+    risk_score FLOAT NOT NULL,
+    tabular_score FLOAT NOT NULL,
+    gnn_score FLOAT NOT NULL,
+    velocity_multiplier FLOAT DEFAULT 1.0,
+    risk_tier VARCHAR(20) NOT NULL,
+    decision VARCHAR(30) NOT NULL,
+    scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS investigation_reports (
+    investigation_id VARCHAR(50) PRIMARY KEY,
+    transaction_id VARCHAR(50) REFERENCES transactions(transaction_id),
+    risk_score FLOAT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    fraud_hypothesis TEXT NOT NULL,
+    recommended_action VARCHAR(50) NOT NULL,
+    summary_report TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS system_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    module VARCHAR(50),
+    level VARCHAR(20),
+    message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_tx_device ON transactions(device_id);
+CREATE INDEX IF NOT EXISTS idx_tx_ip ON transactions(ip_address);
+CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp);

@@ -1,0 +1,35 @@
+{
+  "tabular_only": {
+    "roc_auc": 1.0,
+    "pr_auc": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "tp": 213,
+    "fp": 0,
+    "fn": 0,
+    "tn": 4361
+  },
+  "gnn_only": {
+    "roc_auc": 1.0,
+    "pr_auc": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "tp": 213,
+    "fp": 0,
+    "fn": 0,
+    "tn": 4361
+  },
+  "stacked": {
+    "roc_auc": 1.0,
+    "pr_auc": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "tp": 213,
+    "fp": 0,
+    "fn": 0,
+    "tn": 4361
+  }
+}
