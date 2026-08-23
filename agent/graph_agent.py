@@ -71,7 +71,7 @@ class RiskInvestigationAgent:
                 provider, hypothesis, rec_action, rationale = llm_investigator.investigate_with_llm(
                     txn_payload, risk_summary, evidence, forced_provider=override
                 )
-                agent_mode = f"llm:{provider.lower()}"
+                if(provider): agent_mode = f"llm:{provider.lower()}"
                 agent_mode_label = f"LLM-generated investigation (via {provider})"
             except Exception as e:
                 logger.warning(f"LLM investigation failed ({e}) — falling back to deterministic rules.")
