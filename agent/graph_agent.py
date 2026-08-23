@@ -23,7 +23,7 @@ import datetime
 
 from agent.tools import GraphTool, TransactionHistoryTool, DeviceRiskTool, FraudModelTool
 from agent.deterministic_agent import determine_fraud_hypothesis
-from agent import llm_investigator
+from agent import llm_investigator, mode_state
 from agent.prompts import REPORT_TEMPLATE
 from utils.logger import get_logger
 
@@ -54,19 +54,29 @@ class RiskInvestigationAgent:
                     f"proxy: {device_evidence['is_suspicious_proxy']}")
 
         # Step 2: hypothesis — try LLM if configured, fall back on any failure
+        # `override` is the dashboard's "Agent mode" selector (agent/mode_state.py):
+        # "auto" preserves the original priority-order behavior, a specific
+        # provider name forces that provider (report generation still falls
+        # back to deterministic if that provider's call fails), and
+        # "deterministic" skips the LLM path entirely even if a key is set.
+        override = mode_state.get_mode()
         agent_mode = "deterministic_fallback"
         agent_mode_label = "Deterministic rule-based fallback (no LLM API key configured)"
         hypothesis = rec_action = rationale = None
 
-        if llm_investigator.is_available():
+        if override == "deterministic":
+            agent_mode_label = "Deterministic rule-based (agent mode manually forced)"
+        elif llm_investigator.is_available(None if override == "auto" else override):
             try:
                 provider, hypothesis, rec_action, rationale = llm_investigator.investigate_with_llm(
-                    txn_payload, risk_summary, evidence
+                    txn_payload, risk_summary, evidence, forced_provider=override
                 )
                 agent_mode = f"llm:{provider.lower()}"
                 agent_mode_label = f"LLM-generated investigation (via {provider})"
             except Exception as e:
                 logger.warning(f"LLM investigation failed ({e}) — falling back to deterministic rules.")
+        elif override != "auto":
+            agent_mode_label = f"Deterministic rule-based fallback ({override} selected but its API key isn't configured)"
 
         if hypothesis is None:
             hypothesis, rec_action, rationale = determine_fraud_hypothesis(
