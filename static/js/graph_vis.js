@@ -8,7 +8,7 @@ function renderGraphTopology(userId) {
     if (noteEl) noteEl.style.display = 'none';
     container.innerHTML = '<div class="graph-loading">Loading network…</div>';
 
-    fetch(`/api/v1/graph/topology/${userId}`)
+    fetch(`${API_BASE}/api/v1/graph/topology/${userId}`)
         .then(res => res.json())
         .then(data => {
             if (!data.nodes || data.nodes.length === 0) {
