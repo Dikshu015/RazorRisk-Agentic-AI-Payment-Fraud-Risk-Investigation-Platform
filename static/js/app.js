@@ -173,10 +173,12 @@ function updateRiskDisplay(evalRes) {
 
 function renderAgentReport(agentRes) {
     const container = document.getElementById('agent-report-container');
-    container.innerHTML = marked.parse(agentRes.summary_report);
-    // Reflect the mode that ACTUALLY ran for this specific report — not
-    // just the general "what would run next" status — so the badge never
-    // implies more than the report it's sitting next to actually did.
+    if (typeof marked !== 'undefined') {
+        container.innerHTML = marked.parse(agentRes.summary_report);
+    } else {
+        console.error("marked.js failed to load — showing raw markdown as plain text.");
+        container.innerText = agentRes.summary_report;
+    }
     setAgentBadge(agentRes.agent_mode_label || agentRes.agent_mode, agentRes.agent_mode);
 }
 
