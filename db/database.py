@@ -2,7 +2,7 @@ import sqlite3
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from config import DATABASE_URL, BASE_DIR
+from config import DATABASE_URL, BASE_DIR, SQLITE_DB_PATH
 from utils.logger import get_logger
 
 logger = get_logger("database")
@@ -46,6 +46,8 @@ def init_db():
         logger.info("SQLAlchemy models synced with database target.")
 
 def get_raw_sqlite_connection():
-    """Get direct sqlite connection for pandas / graph queries if using sqlite"""
-    db_file = str(BASE_DIR / 'razor_risk.db')
-    return sqlite3.connect(db_file)
+    """Get direct sqlite connection for pandas / graph queries if using sqlite.
+    Uses the same path config.py's DATABASE_URL was built from — was
+    previously hardcoded to BASE_DIR (read-only on Vercel), silently
+    ignoring DATABASE_URL entirely."""
+    return sqlite3.connect(str(SQLITE_DB_PATH))
