@@ -1,13 +1,32 @@
 services:
   - type: web
     name: razor-risk-app
-    env: python
-    buildCommand: "pip install -r requirements.txt && python data/generate_synthetic_data.py && python ml/train_tabular_model.py && python ml/train_gnn.py"
+    runtime: python
+    # Explicit stacker training step added: ml/risk_aggregator.py's
+    # train_stacker() lazily self-heals if aggregator.npz is missing, but
+    # that means the FIRST live request would pay for training instead of
+    # a slow build. Training it here keeps first-request latency normal.
+    buildCommand: "pip install -r requirements.txt && python -m data.generate_synthetic_data && python -m ml.train_tabular_model && python -m ml.train_gnn && python -m ml.risk_aggregator"
     startCommand: "python run.py"
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
       - key: HOST
         value: "0.0.0.0"
       - key: PORT
         value: "10000"
-      - key: DATABASE_URL
-        value: "sqlite:///./razor_risk.db"
+      # DATABASE_URL intentionally NOT set here — config.py's own default
+      # (an absolute path under the project directory) is what get_raw_sqlite_
+      # connection() and init_db() both actually use; overriding it with a
+      # relative "./razor_risk.db" here previously only worked by coincidence
+      # of Render's working directory matching the project root.
+      # Optional — set these in the Render dashboard (Environment tab) if you
+      # want the LLM investigation agent to run live instead of its
+      # deterministic rule-based fallback. sync: false means Render prompts
+      # for a value instead of storing one in this committed file.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
