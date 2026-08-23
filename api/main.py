@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-from config import BASE_DIR
+from config import BASE_DIR, IS_SERVERLESS, SQLITE_DB_PATH
 from db.database import init_db, get_raw_sqlite_connection
 from ml.graph_builder import graph_builder
 from utils.logger import get_logger
@@ -46,6 +46,25 @@ app.mount("/dashboard", StaticFiles(directory=str(static_dir), html=True), name=
 def on_startup():
     logger.info("Starting RazorRisk FastAPI Backend Engine...")
     init_db()
+
+    # On Vercel, DATABASE_URL points at /tmp (see config.py) — a fresh,
+    # empty file on every cold start, since /tmp doesn't persist between
+    # invocations. Pre-trained model weights ARE bundled with the deployment
+    # (ml/models/*.joblib, *.npz — read-only access is fine), so no retraining
+    # is needed here, but without any seed data the fraud-ring demo presets
+    # (USER_RING1_1, etc.) would have no graph relationships to actually
+    # demonstrate. Seed a small synthetic dataset once per cold start so the
+    # demo works the same way it does locally, just regenerated each time
+    # instead of persisted.
+    if IS_SERVERLESS:
+        conn = get_raw_sqlite_connection()
+        txn_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        conn.close()
+        if txn_count == 0:
+            logger.info(f"Serverless cold start with empty DB at {SQLITE_DB_PATH} — seeding a small synthetic dataset...")
+            from data.generate_synthetic_data import generate_dataset
+            generate_dataset(num_users=150, num_transactions=800, seed=42)
+
     # Populate the in-memory entity graph + community detection from whatever
     # is currently in the database. Without this, the process boots with an
     # empty graph and every live risk score silently loses its graph signal
