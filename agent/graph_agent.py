@@ -122,6 +122,7 @@ class RiskInvestigationAgent:
             "user_id": user_id,
             "risk_score": risk_summary.get("risk_score", 85.0),
             "agent_mode": agent_mode,
+            "agent_mode_label": agent_mode_label,
             "evidence": evidence,
             "fraud_hypothesis": hypothesis,
             "recommended_action": rec_action,
