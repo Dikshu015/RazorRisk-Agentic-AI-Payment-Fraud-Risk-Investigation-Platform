@@ -6,10 +6,20 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
+# Vercel's Python runtime deploys the project as a read-only filesystem —
+# only /tmp is writable, and it doesn't persist between invocations. Vercel
+# sets VERCEL=1 in every function's environment automatically, so this is
+# used to redirect the SQLite DB and log files off the read-only bundle
+# instead of crashing on the first write. Render (and local dev) use a real
+# persistent process, so BASE_DIR is fine there.
+IS_SERVERLESS = bool(os.getenv("VERCEL"))
+RUNTIME_DIR = Path("/tmp") if IS_SERVERLESS else BASE_DIR
+
 # Settings
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'razor_risk.db'}")
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+SQLITE_DB_PATH = RUNTIME_DIR / "razor_risk.db"
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{SQLITE_DB_PATH}")
+LOG_DIR = RUNTIME_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 APP_LOG_PATH = LOG_DIR / "app.log"
 RISK_ENGINE_LOG_PATH = LOG_DIR / "risk_engine.log"
@@ -20,7 +30,7 @@ DATABASE_LOG_PATH = LOG_DIR / "database.log"
 PIPELINE_LOG_PATH = LOG_DIR / "pipeline.log"
 FRONTEND_LOG_PATH = LOG_DIR / "frontend_client.log"
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") # reserved, not currently used
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # reserved, not currently used
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
