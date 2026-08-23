@@ -23,7 +23,12 @@ and recommended_action are LLM-authored when this path runs.
 """
 import json
 
-from config import ANTHROPIC_API_KEY, GROQ_API_KEY, OPENAI_API_KEY
+from pydantic import SecretStr
+
+from config import (
+    ANTHROPIC_API_KEY, GROQ_API_KEY, OPENAI_API_KEY,
+    ANTHROPIC_MODEL, GROQ_MODEL, OPENAI_MODEL,
+)
 from utils.logger import get_logger
 
 logger = get_logger("investigator")
@@ -44,30 +49,74 @@ Rules:
 """
 
 
-def _get_configured_client():
-    """Returns (provider_name, langchain_chat_model) for the first
-    configured API key, or (None, None) if none are set."""
-    if ANTHROPIC_API_KEY:
+def _build_client(provider: str):
+    """Instantiates the langchain chat model for a given provider name
+    ("anthropic" | "groq" | "openai"). Raises if the provider's key isn't
+    configured or its integration package isn't importable — callers are
+    expected to catch this."""
+    if provider == "anthropic":
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured.")
         from langchain_anthropic import ChatAnthropic
-        return "Anthropic", ChatAnthropic(model="claude-3-5-sonnet-latest", api_key=ANTHROPIC_API_KEY, temperature=0)
-    if GROQ_API_KEY:
+        return "Anthropic", ChatAnthropic(
+                                model_name=ANTHROPIC_MODEL,
+                                api_key=SecretStr(ANTHROPIC_API_KEY),
+                                temperature=0,
+                                timeout=None,
+                                stop=None
+                            )
+    if provider == "groq":
+        if not GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY is not configured.")
         from langchain_groq import ChatGroq
-        return "Groq", ChatGroq(model="llama-3.1-70b-versatile", api_key=GROQ_API_KEY, temperature=0)
-    if OPENAI_API_KEY:
+        return "Groq", ChatGroq(model=GROQ_MODEL, api_key=SecretStr(GROQ_API_KEY), temperature=0)
+    if provider == "openai":
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not configured.")
         from langchain_openai import ChatOpenAI
-        return "OpenAI", ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY, temperature=0)
+        return "OpenAI", ChatOpenAI(model=OPENAI_MODEL, api_key=SecretStr(OPENAI_API_KEY), temperature=0)
+    raise ValueError(f"Unknown provider '{provider}'.")
+
+
+def _get_configured_client(forced_provider: str|None = None):
+    """Returns (provider_name, langchain_chat_model) for the requested
+    provider, or — if forced_provider is None/"auto" — the first configured
+    API key in priority order (Anthropic, Groq, OpenAI). Returns (None, None)
+    if nothing is available for the requested selection."""
+    if forced_provider and forced_provider != "auto":
+        return _build_client(forced_provider)
+    if ANTHROPIC_API_KEY:
+        return _build_client("anthropic")
+    if GROQ_API_KEY:
+        return _build_client("groq")
+    if OPENAI_API_KEY:
+        return _build_client("openai")
     return None, None
 
 
-def is_available() -> bool:
-    return bool(ANTHROPIC_API_KEY or GROQ_API_KEY or OPENAI_API_KEY)
+def is_available(provider: str|None = None) -> bool:
+    """With no argument: is ANY provider configured. With a provider name
+    ("anthropic"/"groq"/"openai"): is that specific one configured."""
+    if provider in (None, "auto"):
+        return bool(ANTHROPIC_API_KEY or GROQ_API_KEY or OPENAI_API_KEY)
+    return bool({
+        "anthropic": ANTHROPIC_API_KEY,
+        "groq": GROQ_API_KEY,
+        "openai": OPENAI_API_KEY,
+    }.get(provider))
 
 
-def investigate_with_llm(txn_payload: dict, risk_summary: dict, evidence: dict):
+def configured_providers() -> list:
+    """List of provider keys ("anthropic"/"groq"/"openai") that currently
+    have an API key set, in priority order."""
+    return [p for p in ("anthropic", "groq", "openai") if is_available(p)]
+
+
+def investigate_with_llm(txn_payload: dict, risk_summary: dict, evidence: dict, forced_provider: str | None= None):
     """Returns (provider_name, fraud_hypothesis, recommended_action, action_rationale)
     or raises on any failure — caller (graph_agent.py) catches and falls back
     to the deterministic path, logging why."""
-    provider, llm = _get_configured_client()
+    provider, llm = _get_configured_client(forced_provider=forced_provider)
     if llm is None:
         raise RuntimeError("No LLM API key configured (checked ANTHROPIC_API_KEY, GROQ_API_KEY, OPENAI_API_KEY).")
 
@@ -87,7 +136,13 @@ def investigate_with_llm(txn_payload: dict, risk_summary: dict, evidence: dict):
     ])
 
     content = response.content if hasattr(response, "content") else str(response)
-    content = content.strip()
+    content = response.content if hasattr(response, "content") else response
+
+    if isinstance(content, str):
+        content = content.strip()
+    else:
+        content = str(content).strip()
+
     if content.startswith("```"):
         content = content.strip("`")
         content = content[content.find("{"):content.rfind("}") + 1]
