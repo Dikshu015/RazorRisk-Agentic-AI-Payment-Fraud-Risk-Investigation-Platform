@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     loadStats();
     loadRecentTransactions();
+    loadAgentStatus();
     refreshLogStream();
 
     // Form submit listener
@@ -45,6 +46,8 @@ function initTabs() {
                 refreshLogStream();
             } else if (tabId === 'transactions') {
                 loadRecentTransactions();
+            } else if (tabId === 'agent') {
+                loadAgentStatus();
             }
         });
     });
@@ -171,6 +174,74 @@ function updateRiskDisplay(evalRes) {
 function renderAgentReport(agentRes) {
     const container = document.getElementById('agent-report-container');
     container.innerHTML = agentRes.summary_report;
+    // Reflect the mode that ACTUALLY ran for this specific report — not
+    // just the general "what would run next" status — so the badge never
+    // implies more than the report it's sitting next to actually did.
+    setAgentBadge(agentRes.agent_mode_label || agentRes.agent_mode, agentRes.agent_mode);
+}
+
+// Agent Mode Controls (Groq / Anthropic / OpenAI / deterministic-only)
+function setAgentBadge(label, modeKey) {
+    const badge = document.getElementById('agent-status-badge');
+    if (!badge) return;
+    badge.innerText = label;
+    badge.className = 'agent-status-badge';
+    if (modeKey && modeKey.indexOf('deterministic') !== -1) {
+        badge.classList.add('status-deterministic');
+    }
+}
+
+function loadAgentStatus() {
+    fetch('/api/v1/investigations/agent-status')
+        .then(res => res.json())
+        .then(data => {
+            const select = document.getElementById('agent-mode-select');
+            if (select) {
+                select.innerHTML = '';
+                data.modes.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.value;
+                    opt.innerText = m.available ? m.label : `${m.label} (no API key)`;
+                    opt.disabled = !m.available;
+                    if (m.value === data.current_mode) opt.selected = true;
+                    select.appendChild(opt);
+                });
+            }
+            setAgentBadge(data.active_label, data.active_provider || 'deterministic');
+        })
+        .catch(err => {
+            console.error("Agent status fetch error:", err);
+            setAgentBadge('Status unavailable', null);
+            const badge = document.getElementById('agent-status-badge');
+            if (badge) badge.classList.add('status-error');
+        });
+}
+
+function setAgentMode(mode) {
+    const select = document.getElementById('agent-mode-select');
+    if (select) select.disabled = true;
+
+    fetch('/api/v1/investigations/agent-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
+    })
+        .then(async (res) => {
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Could not change agent mode');
+            return data;
+        })
+        .then(data => {
+            setAgentBadge(data.active_label, data.active_provider || 'deterministic');
+        })
+        .catch(err => {
+            console.error("Agent mode change error:", err);
+            alert("Couldn't change agent mode: " + err.message);
+            loadAgentStatus(); // resync the dropdown with whatever the server actually has
+        })
+        .finally(() => {
+            if (select) select.disabled = false;
+        });
 }
 
 // Data Pipeline Controls (synthetic reseed / real Kaggle ingest + retrain)
