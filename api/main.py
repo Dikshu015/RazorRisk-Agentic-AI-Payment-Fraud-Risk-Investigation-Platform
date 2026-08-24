@@ -47,25 +47,32 @@ def on_startup():
     logger.info("Starting RazorRisk FastAPI Backend Engine...")
     init_db()
 
-    # On Vercel or Hugging Face Spaces, DATABASE_URL points at /tmp (see
-    # config.py) — a fresh,
-    # empty file on every cold start, since /tmp doesn't persist between
-    # invocations. Pre-trained model weights ARE bundled with the deployment
-    # (ml/models/*.joblib, *.npz — read-only access is fine), so no retraining
-    # is needed here, but without any seed data the fraud-ring demo presets
-    # (USER_RING1_1, etc.) would have no graph relationships to actually
-    # demonstrate. Seed a small synthetic dataset once per cold start so the
-    # demo works the same way it does locally, just regenerated each time
-    # instead of persisted.
-    if IS_SERVERLESS:
-        conn = get_raw_sqlite_connection()
-        txn_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-        conn.close()
-        if txn_count == 0:
-            logger.info(f"Serverless cold start with empty DB at {SQLITE_DB_PATH} — seeding a small synthetic dataset...")
+    # Auto-seed whenever the DB is empty, on ANY platform — not gated behind
+    # IS_RESTRICTED_FS. That flag tries to fingerprint specific platforms via
+    # their env vars (VERCEL, SPACE_ID, K_SERVICE), which is inherently a
+    # guessing game — a platform's actual runtime wrapper can decline to pass
+    # through an underlying env var (e.g. Antideploy runs on Cloud Run but
+    # doesn't necessarily expose K_SERVICE the same way a raw Cloud Run
+    # deployment would), silently skipping this block and leaving the
+    # dashboard's demo presets pointing at an empty database with no fraud-ring
+    # relationships to show — exactly what happened on the first Antideploy
+    # deploy. Checking "is the table actually empty" instead of "does this
+    # look like platform X" is robust to that regardless of which host this
+    # runs on, and is a no-op everywhere the DB is already seeded (local dev
+    # after running the Quickstart steps, Render after its buildCommand runs).
+    conn = get_raw_sqlite_connection()
+    txn_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    conn.close()
+    if txn_count == 0:
+        real_csv = BASE_DIR / "data" / "creditcard.csv"
+        if real_csv.exists():
+            logger.info(f"Empty database detected — real dataset found at {real_csv}, ingesting it...")
+            from data.ingest_real_kaggle_dataset import ingest_real_dataset
+            ingest_real_dataset(sample_size=15000)
+        else:
+            logger.info(f"Empty database detected at {SQLITE_DB_PATH} — no real dataset found, seeding synthetic data...")
             from data.generate_synthetic_data import generate_dataset
             generate_dataset(num_users=150, num_transactions=800, seed=42)
-
     # Populate the in-memory entity graph + community detection from whatever
     # is currently in the database. Without this, the process boots with an
     # empty graph and every live risk score silently loses its graph signal
