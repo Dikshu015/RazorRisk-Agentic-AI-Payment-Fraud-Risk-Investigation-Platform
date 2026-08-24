@@ -153,7 +153,11 @@ sequenceDiagram
     GNN-->>API: gnn_score + graph evidence
     API->>AGG: stacker(tabular_score, gnn_score) + velocity/proxy overlay
     AGG-->>API: risk_score, tier, decision
-    alt risk_score >= 70
+    API->>DB: persist transaction + risk score
+    API-->>C: risk_evaluation + needs_investigation + correlation_id
+    Note over C,API: Risk score renders immediately — client does NOT<br/>wait on the agent before showing the gauge/tier/evidence.
+    opt needs_investigation == true
+        C->>API: POST /investigations/run/{txn_id}  (separate follow-up call)
         API->>AGT: investigate(txn, risk_summary)
         AGT->>AGT: gather evidence (4 deterministic tools)
         alt LLM key configured
@@ -162,10 +166,10 @@ sequenceDiagram
             AGT->>AGT: deterministic fallback rules
         end
         AGT-->>API: investigation report (agent_mode labeled)
+        API->>DB: persist investigation report
+        API-->>C: report (rendered client-side via marked.js)
     end
-    API->>DB: persist transaction, risk score, report
     API->>LOG: every step logged with the same correlation ID
-    API-->>C: risk_evaluation + agent_investigation + correlation_id
 ```
 
 ### Step 1: Request Ingestion (`api/routes_transactions.py`)
@@ -202,13 +206,23 @@ sequenceDiagram
   - `70.0 – 89.9`: `HIGH` → `HOLD_FOR_INVESTIGATION`
   - `90.0 – 100.0`: `CRITICAL` → `BLOCK_AND_INVESTIGATE`
 
-### Step 5: Automatic Agent Dispatch (`agent/graph_agent.py`)
-- If Risk Score ≥ 70.0, `investigation_agent.investigate(txn_payload, risk_summary)` runs.
+### Step 5: Automatic Agent Dispatch, as a Separate Follow-Up Call (`agent/graph_agent.py`)
+- If Risk Score ≥ 70.0, `/api/v1/transactions/score` returns `needs_investigation: true` **without** running the
+  investigation itself — the risk score, tier, and evidence render in the dashboard immediately. The frontend
+  (`static/js/app.js`) then fires a separate `POST /api/v1/investigations/run/{transaction_id}` and fills in the
+  report panel once that resolves. This split exists because the investigation step is materially slower than
+  the risk scoring step (an LLM call can take several seconds; risk scoring is sub-second) — an earlier version
+  ran both synchronously inside `/score`, so the whole UI waited on the slowest part even when nothing about the
+  fast part had anything left to compute.
 - **Evidence gathering is identical regardless of mode** — 4 deterministic tools (`agent/tools.py`):
   `GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`.
 - **Hypothesis generation** then tries `agent/llm_investigator.py` if `ANTHROPIC_API_KEY` / `GROQ_API_KEY` /
   `OPENAI_API_KEY` is set; on any failure (or no key at all) falls back to `agent/deterministic_agent.py`'s
   rule-based pattern matching. The resulting report's `agent_mode` field states which one actually ran.
+- Which path runs can also be forced from the dashboard's **Agent mode** selector — `GET /agent-status` /
+  `POST /agent-mode` in `api/routes_agent.py`, backed by `agent/mode_state.py`'s process-local in-memory
+  override (`auto` / a specific provider / `deterministic`). Useful for demoing "this is what the LLM path
+  looks like" vs. "this is the fallback" on demand, without needing different API keys configured.
 
 ### Step 6: Database Persistence & Log Streaming (`db/database.py` & `utils/logger.py`)
 - Saves transaction, risk score, and investigation report to SQLite (or PostgreSQL if `DATABASE_URL` is set).
@@ -219,15 +233,54 @@ sequenceDiagram
 
 ### Step 7: Dashboard UI Update (`static/js/app.js` & `static/js/graph_vis.js`)
 - Updates the risk gauge (color driven by actual tier, not hardcoded red) and the three model-breakdown bars —
-  the third bar shows the stacker's calibrated score, not a fabricated "topology risk" number.
+  the third bar shows the stacker's calibrated score, not a fabricated "topology risk" number. This happens the
+  instant `/score` responds, independent of whether an investigation is still running.
 - Vis.js renders a capped, fraud-signal-focused 2-hop network around the user (Device/IP hops only — Merchant
   fan-out is excluded, see §1).
-- Displays the agent report (states its own mode) and streams log lines into the audit console.
+- Displays the agent report once its separate follow-up call resolves (states its own mode), parsed from
+  Markdown to HTML via `marked.js` rather than dumped as raw text, and streams log lines into the audit console.
 - Any uncaught frontend JS error gets POSTed to `/api/v1/logs/client` automatically.
+- All fetch calls go through an `API_BASE` constant (`window.RAZORRISK_API_BASE`, set in `index.html`) instead
+  of hardcoded relative paths — empty by default (same-origin), overridable when the dashboard is deployed
+  standalone against a different backend origin. See §4 below.
 
 ---
 
-## 4. Deep-Dive Component Map
+## 4. Deployment & Ops
+
+**Two platforms, deliberately split — not a preference, a size constraint.** The backend's dependency stack —
+XGBoost, SciPy, scikit-learn, pandas, plus the LangChain provider packages — installs to roughly 2GB. Vercel's
+serverless Python functions cap out around 250MB unzipped, so the backend cannot run there as a function
+regardless of configuration. The working split:
+
+- **Render** runs the actual backend — a real, persistent process, so `razor_risk.db` and `logs/*.log` behave
+  exactly like they do locally. `render.yaml` drives the build: install deps, generate the synthetic dataset,
+  train the tabular model, the GNN, and the stacker, so the very first request after deploy is already warm.
+- **Vercel** (optional) serves *only* `static/` as a plain static site (`vercel.json`: `{"outputDirectory":
+  "static"}` — no Python function involved at all), calling the Render backend cross-origin via
+  `window.RAZORRISK_API_BASE`. CORS is wide open on the API (`api/main.py`) specifically to support this.
+
+**What had to change in the code for this to even be possible**, beyond the platform configs themselves:
+- `config.py` added `IS_SERVERLESS` (keyed off Vercel's own `VERCEL=1` env var, present nowhere else) and a
+  single `SQLITE_DB_PATH` / `LOG_DIR` that redirect to `/tmp` when serverless — Vercel's deployment filesystem is
+  read-only outside `/tmp`, so any write against the project directory itself would throw and take the request
+  down. This only matters if the backend itself is ever run in a serverless context; Render is unaffected since
+  `IS_SERVERLESS` stays `False` there.
+- `db/database.py`'s `get_raw_sqlite_connection()` was hardcoded to `BASE_DIR`, silently ignoring `DATABASE_URL`
+  — invisible locally and on Render (both paths coincidentally agreed), but would have been a hard crash the
+  moment `DATABASE_URL` and the hardcoded path ever diverged. Fixed to read the same `SQLITE_DB_PATH`.
+- `api/main.py`'s startup hook auto-seeds a small synthetic dataset if it finds an empty DB on a serverless cold
+  start, so the fraud-ring demo presets (which reference specific graph relationships) still have something to
+  show even though `/tmp` doesn't persist between invocations.
+- `static/index.html`'s asset paths changed from absolute `/dashboard/...` to relative, so the identical HTML
+  file works whether it's mounted under FastAPI's `StaticFiles` (Render, local) or served standalone at the
+  domain root (Vercel).
+
+Full step-by-step deploy instructions for both platforms are in `README.md`'s **Deployment** section.
+
+---
+
+## 5. Deep-Dive Component Map
 
 ### A. Database Layer (`db/`)
 - `schema.sql` — `users`, `devices`, `ip_addresses`, `merchants`, `transactions`, `risk_scores`,
@@ -274,7 +327,9 @@ transactions, and merchant collusion.
   correlation ID per request.
 - `routes_graph.py` — `/api/v1/graph/topology/{user_id}` (capped, Device/IP-only 2nd hop),
   `/api/v1/graph/communities`.
-- `routes_agent.py` — `/api/v1/investigations/run/{txn_id}`, `/api/v1/investigations/{txn_id}`.
+- `routes_agent.py` — `/api/v1/investigations/run/{txn_id}`, `/api/v1/investigations/{txn_id}`, plus
+  `GET /agent-status` / `POST /agent-mode` for the dashboard's live agent-mode selector (backed by
+  `agent/mode_state.py`'s in-memory override — resets to `auto` on restart, not persisted app config).
 - `routes_logs.py` — `/api/v1/logs/stream` (all 8 channels), `/api/v1/logs/client` (frontend error capture).
 - `routes_admin.py` — `/api/v1/admin/pipeline/synthetic`, `/api/v1/admin/pipeline/real`: reseed/ingest, rebuild
   the dashboard graph, run the full tabular → GNN → stacker retrain, return held-out eval metrics, and drop the
@@ -283,7 +338,7 @@ transactions, and merchant collusion.
 
 ---
 
-## 5. How to Explain This Project in an Interview
+## 6. How to Explain This Project in an Interview
 
 1. **The Core Problem**:
    > *"Existing payment fraud models look at transactions in isolation. If 7 stolen credit cards are used on 7 new accounts, a row-level model evaluates 7 independent 'normal-looking' transactions. RazorRisk builds a User-only weighted graph from shared device/IP fingerprints and runs community detection on it, so 7 accounts sharing one device show up as a dense cluster regardless of how normal each individual transaction looks."*
@@ -296,3 +351,6 @@ transactions, and merchant collusion.
 
 4. **Production Readiness & Auditability**:
    > *"Every subsystem — API, risk engine, agent, ML training, graph, database, pipeline, frontend — logs to its own rotating file, and every scored transaction gets a correlation ID that ties its log lines together across all of them. I can hand someone a transaction ID and they can grep the exact decision trail across every model that touched it."*
+
+5. **The Deployment Split — a Real Constraint, Not a Preference**:
+   > *"XGBoost, SciPy, and the LangChain provider packages together install to about 2GB, and Vercel's serverless Python functions cap out around 250MB unzipped — so the backend was never going to run there as a function no matter how I configured it. I run the backend on Render, a real persistent process, and optionally mirror just the static dashboard on Vercel pointed at the Render URL over CORS. That decision also surfaced a real bug: the raw SQLite connection helper had a hardcoded path that happened to agree with the SQLAlchemy engine's path locally and on Render, but would have silently diverged — and crashed every write — the moment I tried running any part of this somewhere with a read-only filesystem. Now there's one source of truth for that path instead of two that happened to match."*
