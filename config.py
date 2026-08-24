@@ -6,14 +6,16 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-# Vercel's Python runtime deploys the project as a read-only filesystem —
-# only /tmp is writable, and it doesn't persist between invocations. Vercel
-# sets VERCEL=1 in every function's environment automatically, so this is
-# used to redirect the SQLite DB and log files off the read-only bundle
-# instead of crashing on the first write. Render (and local dev) use a real
-# persistent process, so BASE_DIR is fine there.
-IS_SERVERLESS = bool(os.getenv("VERCEL"))
-RUNTIME_DIR = Path("/tmp") if IS_SERVERLESS else BASE_DIR
+# Vercel's Python runtime and Hugging Face Spaces' Docker runtime both
+# deploy the project onto a read-only filesystem outside /tmp, and neither
+# persists /tmp across a redeploy/restart. Vercel sets VERCEL=1 and HF
+# Spaces sets SPACE_ID automatically in every container's environment, so
+# either one flips this flag — redirecting the SQLite DB and log files to
+# /tmp instead of crashing on the first write. Render (and local dev) use a
+# real writable, persistent process, so BASE_DIR is fine there.
+IS_RESTRICTED_FS = bool(os.getenv("VERCEL") or os.getenv("SPACE_ID"))
+IS_SERVERLESS = IS_RESTRICTED_FS  # kept as an alias — existing call sites (api/main.py) use this name
+RUNTIME_DIR = Path("/tmp") if IS_RESTRICTED_FS else BASE_DIR
 
 # Settings
 SQLITE_DB_PATH = RUNTIME_DIR / "razor_risk.db"
