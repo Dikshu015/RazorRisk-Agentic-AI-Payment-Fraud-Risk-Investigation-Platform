@@ -47,7 +47,8 @@ def on_startup():
     logger.info("Starting RazorRisk FastAPI Backend Engine...")
     init_db()
 
-    # On Vercel, DATABASE_URL points at /tmp (see config.py) — a fresh,
+    # On Vercel or Hugging Face Spaces, DATABASE_URL points at /tmp (see
+    # config.py) — a fresh,
     # empty file on every cold start, since /tmp doesn't persist between
     # invocations. Pre-trained model weights ARE bundled with the deployment
     # (ml/models/*.joblib, *.npz — read-only access is fine), so no retraining
@@ -77,6 +78,16 @@ def on_startup():
         f"Graph ready: {graph_builder.G.number_of_nodes()} nodes, "
         f"{graph_builder.G.number_of_edges()} edges."
     )
+
+from fastapi.responses import RedirectResponse
+
+@app.get("/")
+def root():
+    # Bare domain root has no content of its own — without this, hosts like
+    # antideploy.com that put the app straight at the domain root return a
+    # plain FastAPI {"detail":"Not Found"} for anyone who visits the base URL
+    # instead of /dashboard/ directly.
+    return RedirectResponse(url="/dashboard/")
 
 @app.get("/health")
 def health_check():
