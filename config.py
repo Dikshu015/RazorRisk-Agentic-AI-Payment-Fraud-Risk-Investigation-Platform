@@ -6,19 +6,24 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-# Vercel's Python runtime and Hugging Face Spaces' Docker runtime both
-# deploy the project onto a read-only filesystem outside /tmp, and neither
-# persists /tmp across a redeploy/restart. Vercel sets VERCEL=1 and HF
-# Spaces sets SPACE_ID automatically in every container's environment, so
-# either one flips this flag — redirecting the SQLite DB and log files to
-# /tmp instead of crashing on the first write. Render (and local dev) use a
-# real writable, persistent process, so BASE_DIR is fine there.
-IS_RESTRICTED_FS = bool(os.getenv("VERCEL") or os.getenv("SPACE_ID"))
+# Vercel's Python runtime, Hugging Face Spaces' Docker runtime, and
+# Antideploy (built on Google Cloud Run) all deploy onto a filesystem that's
+# either read-only outside /tmp or gets wiped on every cold start/redeploy.
+# Vercel sets VERCEL=1, HF Spaces sets SPACE_ID, and Cloud Run itself sets
+# K_SERVICE on every service unconditionally (it's how Cloud Run identifies
+# itself, documented and unlikely to change) — any one of these flips this
+# flag, redirecting the SQLite DB and log files to /tmp instead of losing
+# data unpredictably or crashing on the first write. Render (and local dev)
+# use a real writable, persistent process, so BASE_DIR is fine there.
+IS_RESTRICTED_FS = bool(os.getenv("VERCEL") or os.getenv("SPACE_ID") or os.getenv("K_SERVICE"))
 IS_SERVERLESS = IS_RESTRICTED_FS  # kept as an alias — existing call sites (api/main.py) use this name
 RUNTIME_DIR = Path("/tmp") if IS_RESTRICTED_FS else BASE_DIR
 
 # Settings
 SQLITE_DB_PATH = RUNTIME_DIR / "razor_risk.db"
+# SQLite-only — see db/database.py for why the earlier Postgres-via-
+# DATABASE_URL path was removed rather than kept half-wired. This is now
+# only used for the startup log line showing where the DB actually lives.
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{SQLITE_DB_PATH}")
 LOG_DIR = RUNTIME_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
