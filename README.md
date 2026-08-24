@@ -8,8 +8,8 @@ RazorRisk is designed around a specific limitation of transaction-level fraud sc
 
 ## Live Demo / Video / Screenshots
 
-- [**Live Dashboard**](https://razorrisk-agentic-ai-payment-f-686b5806-26sovuzgtq-as.a.run.app/dashboard/)
-- [**API / Swagger**](https://razorrisk-agentic-ai-payment-f-686b5806-26sovuzgtq-as.a.run.app/docs)
+- [**Live Dashboard**](https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/dashboard/)
+- [**API / Swagger**](https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/docs)
 - **Demo Video:** `currently not available`
 
 ### Dashboard
