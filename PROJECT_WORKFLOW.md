@@ -87,8 +87,7 @@ flowchart TD
 
 2. Database Schema & Data Models
    - db/schema.sql
-   - db/database.py
-   - db/models.py
+   - db/database.py             raw sqlite3 only — see §4 bug #12 for why the earlier SQLAlchemy path is gone
 
 3. Synthetic Data & Fraud Scenarios
    - data/generate_synthetic_data.py    each user has ONE dedicated device/IP + benign co-location noise
@@ -142,7 +141,7 @@ sequenceDiagram
     participant GNN as Risk Graph + GNN
     participant AGG as Risk Aggregator (Stacker)
     participant AGT as Investigation Agent
-    participant DB as SQLite/Postgres
+    participant DB as SQLite
     participant LOG as logs/*.log
 
     C->>API: POST /transactions/score
@@ -225,7 +224,7 @@ sequenceDiagram
   looks like" vs. "this is the fallback" on demand, without needing different API keys configured.
 
 ### Step 6: Database Persistence & Log Streaming (`db/database.py` & `utils/logger.py`)
-- Saves transaction, risk score, and investigation report to SQLite (or PostgreSQL if `DATABASE_URL` is set).
+- Saves transaction, risk score, and investigation report to SQLite (`db/database.py` — see §4's bug #12 for why an earlier parallel Postgres-via-`DATABASE_URL` path was removed rather than kept half-wired).
 - Logs route to 8 subsystem channels: `app`, `risk_engine`, `agent`, `ml_training`, `graph`, `database`,
   `pipeline`, `frontend_client` — every line for this request carries the correlation ID from Step 1.
 - The live in-memory dashboard graph gets this one transaction folded in incrementally
@@ -276,7 +275,27 @@ regardless of configuration. The working split:
   file works whether it's mounted under FastAPI's `StaticFiles` (Render, local) or served standalone at the
   domain root (Vercel).
 
-Full step-by-step deploy instructions for both platforms are in `README.md`'s **Deployment** section.
+**What Antideploy specifically surfaced, after Render/Vercel/HF Spaces were already handled:**
+- **Bug #11 — bare domain root 404'd.** Antideploy (and any host that serves the app at its actual domain root
+  rather than a subpath) hit `GET /` and got FastAPI's default `{"detail":"Not Found"}`, since the app never
+  defined a route there — only `/health`, `/dashboard/`, `/docs`, and the `/api/v1/...` routes existed. Fixed
+  with a `GET /` → `RedirectResponse("/dashboard/")` in `api/main.py`.
+- **Bug #12 — an auto-detector caught a real architectural leftover.** Antideploy reads `requirements.txt` to
+  infer what infrastructure an app needs, saw `asyncpg`/`psycopg2-binary`, and offered to provision a Postgres
+  database. That correctly reflected what the dependency list *implied* — a parallel SQLAlchemy engine +
+  `db/models.py` ORM models existed specifically to support Postgres via `DATABASE_URL` — but it was dead code:
+  every actual query in the entire app (`api/`, `ml/`, `data/`, `agent/`) went through
+  `get_raw_sqlite_connection()`, a raw `sqlite3` connection that doesn't even speak Postgres. The auto-detector
+  wasn't wrong about the dependency; the dependency was the bug. Removed `db/models.py`, the SQLAlchemy engine
+  code in `db/database.py`, and the `sqlalchemy`/`asyncpg`/`psycopg2-binary` packages from `requirements.txt`
+  entirely, rather than leave a second, decorative data layer that nothing used.
+- **Bug #13 — the `/tmp` redirect (bug #10) didn't recognize Cloud Run.** Antideploy runs on Google Cloud Run,
+  which has the same ephemeral-filesystem characteristics as Vercel (wiped on redeploy) but wasn't in the
+  original serverless-detection check — only `VERCEL` and (later) `SPACE_ID` were. `IS_RESTRICTED_FS` now also
+  checks `K_SERVICE`, an env var Cloud Run sets on every service unconditionally, regardless of which platform
+  is fronting it.
+
+Full step-by-step deploy instructions for all platforms are in `README.md`'s **Deployment** section.
 
 ---
 
@@ -285,7 +304,7 @@ Full step-by-step deploy instructions for both platforms are in `README.md`'s **
 ### A. Database Layer (`db/`)
 - `schema.sql` — `users`, `devices`, `ip_addresses`, `merchants`, `transactions`, `risk_scores`,
   `investigation_reports`, `system_logs`.
-- `database.py` — SQLAlchemy connection manager, SQLite by default with PostgreSQL support via `DATABASE_URL`.
+- `database.py` — raw `sqlite3` connection helper + schema init. An earlier SQLAlchemy/Postgres-via-`DATABASE_URL` path existed here but was dead code (nothing ever queried through it) and got removed — see §4's bug #12.
 
 ### B. Synthetic Data & Fraud Ring Generator (`data/generate_synthetic_data.py`)
 Generates ~12,000 transactions. Each normal user gets **their own dedicated device + IP** (a person doesn't
