@@ -8,27 +8,31 @@ RazorRisk is designed around a specific limitation of transaction-level fraud sc
 
 ## Live Demo / Video / Screenshots
 
-> **ADD YOUR LINKS HERE BEFORE PUBLISHING**
-
-- [**Live Dashboard**] (https://razorrisk-agentic-ai-payment-f-686b5806-26sovuzgtq-as.a.run.app/dashboard/)
--[**API / Swagger**](https://razorrisk-agentic-ai-payment-f-686b5806-26sovuzgtq-as.a.run.app/docs)
-- **Demo Video:** `PASTE_YOUTUBE_OR_DRIVE_VIDEO_LINK_HERE`
+- [**Live Dashboard**](https://razorrisk-agentic-ai-payment-f-686b5806-26sovuzgtq-as.a.run.app/dashboard/)
+- [**API / Swagger**](https://razorrisk-agentic-ai-payment-f-686b5806-26sovuzgtq-as.a.run.app/docs)
+- **Demo Video:** `currently not available`
 
 ### Dashboard
 
 ![alt text](image.png)
 
-### Fraud-Ring Investigation
+### Graph Topology
 
-<!-- SCREENSHOT 2 — SHOW a CRITICAL fraud-ring score + graph + investigation report.
-![Fraud Ring Investigation](PASTE_IMAGE_URL_HERE)
--->
+![alt text](image-3.png)
+
+### Live Stream
+
+![alt text](image-4.png)
+![alt text](image-5.png)
 
 ### Evidence / Agent Mode
 
-<!-- SCREENSHOT 3 — SHOW the evidence panel and the agent-mode/status panel.
-![Investigation Evidence](PASTE_IMAGE_URL_HERE)
--->
+![alt text](image-1.png)
+![alt text](image-2.png)
+
+### Audit System Logs
+
+![alt text](image-6.png)
 
 ---
 
@@ -232,9 +236,9 @@ cp .env.example .env
 # OPENAI_API_KEY=...
 
 # Seed data — choose one:
-python data/generate_synthetic_data.py
+python -m data.generate_synthetic_data
 # or:
-python data/ingest_real_kaggle_dataset.py
+python -m data.ingest_real_kaggle_dataset
 
 # Train tabular model + GNN + learned stacker
 python -m ml.risk_aggregator
