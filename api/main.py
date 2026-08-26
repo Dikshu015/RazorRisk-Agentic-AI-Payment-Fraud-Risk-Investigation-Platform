@@ -12,6 +12,7 @@ from api.routes_graph import router as graph_router
 from api.routes_agent import router as agent_router
 from api.routes_logs import router as logs_router
 from api.routes_admin import router as admin_router
+from api.routes_hitl import router as hitl_router
 
 logger = get_logger("api_main")
 
@@ -36,6 +37,7 @@ app.include_router(graph_router)
 app.include_router(agent_router)
 app.include_router(logs_router)
 app.include_router(admin_router)
+app.include_router(hitl_router)
 
 # Mount Static Files for Dashboard
 static_dir = BASE_DIR / "static"
