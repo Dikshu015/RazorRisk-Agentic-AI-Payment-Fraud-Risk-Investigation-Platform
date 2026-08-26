@@ -4,7 +4,9 @@ import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from ml.risk_aggregator import calculate_composite_risk_score
+from ml.risk_aggregator import calculate_composite_risk_score, HIGH_RISK_THRESHOLD, invalidate_live_graph_snapshot
+from ml.decision_policy import apply_decision_policy
+from api.routes_hitl import enqueue_review
 from ml.graph_builder import graph_builder
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger, bind_correlation_id, clear_correlation_id
@@ -21,17 +23,22 @@ class TransactionPayload(BaseModel):
     merchant_id: str = Field(default="MCH_001", example="MCH_001")
     amount: float = Field(..., example=45000.0)
     currency: str = Field(default="INR")
-    velocity_1h: int = Field(default=1, example=3)
-    amount_zscore_prior: float = Field(default=0.0)
+    # Velocity has an explicit source-selection control for testing and
+    # simulation: when velocity_source_client is True, the supplied value is
+    # trusted; when False, the backend computes the trailing 1-hour count from
+    # persisted transaction history. This makes the frontend toggle mean
+    # exactly what it says instead of silently ignoring a client value.
     is_vpn_proxy: bool = Field(default=False)
     is_suspicious_proxy: bool = Field(default=False)
+    velocity_enabled: bool = Field(default=False, description="Frontend source toggle: True trusts client velocity; False calculates velocity in backend")
+    velocity_1h: Optional[int] = Field(default=None, ge=0, description="Client velocity used only when velocity_enabled is True")
 
 @router.post("/score")
 def score_transaction(payload: TransactionPayload):
     """
     Evaluates an incoming payment transaction in real-time.
     Computes Tabular ML fraud probability, GNN node embedding score, and graph topology risk.
-    Triggers LangGraph Investigation Agent if Risk Score >= 70.0.
+    Returns immediately; high-risk/HITL transactions are investigated by a separate follow-up request.
     """
     txn_dict = payload.model_dump()
     txn_id = txn_dict.get("transaction_id") or f"TXN_{uuid.uuid4().hex[:8].upper()}"
@@ -47,13 +54,15 @@ def score_transaction(payload: TransactionPayload):
     try:
         # 1. Compute Composite Risk Score
         risk_res = calculate_composite_risk_score(txn_dict)
+        policy_res = apply_decision_policy(txn_dict, risk_res)
+        risk_res.update(policy_res)
 
         # 2. High-risk transactions (>= 70) need an investigation, but that
         # can involve a real LLM call and take several seconds — it's run
         # as a separate follow-up request (POST /api/v1/investigations/run/{id})
         # from the frontend so the risk score itself renders instantly instead
         # of the whole scoring UI blocking on the slower agent step.
-        needs_investigation = risk_res["risk_score"] >= 70.0
+        needs_investigation = risk_res["risk_score"] >= HIGH_RISK_THRESHOLD or risk_res.get("hitl_required", False)
 
         # 3. Persist to Database
         conn = get_raw_sqlite_connection()
@@ -67,30 +76,45 @@ def score_transaction(payload: TransactionPayload):
         cursor.execute("INSERT OR IGNORE INTO ip_addresses (ip_address, country, city, isp, is_suspicious_proxy) VALUES (?, ?, ?, ?, ?)",
                        (payload.ip_address, "IN", "Mumbai", "Airtel", payload.is_suspicious_proxy))
 
-        # Insert Transaction
+        # Persist the effective velocity actually used by the scoring path.
+        # In client-trust mode this is the supplied simulation value; in
+        # backend mode it is the database-derived trailing-1h count.
         cursor.execute("""
             INSERT OR REPLACE INTO transactions
-            (transaction_id, user_id, device_id, ip_address, merchant_id, amount, currency, timestamp, status, velocity_1h, amount_zscore_prior)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (transaction_id, user_id, device_id, ip_address, merchant_id, amount, currency, timestamp, status, velocity_1h, velocity_enabled, velocity_source, amount_zscore_prior)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             txn_id, payload.user_id, payload.device_id, payload.ip_address, payload.merchant_id,
             payload.amount, payload.currency, datetime.datetime.now().isoformat(), "COMPLETED",
-            payload.velocity_1h, payload.amount_zscore_prior
+            risk_res["velocity_1h"], 1 if risk_res.get("velocity_source") == "CLIENT" else 0,
+            risk_res.get("velocity_source", "BACKEND"), risk_res["amount_zscore_prior"]
         ))
 
-        # Insert Risk Score
+        # Insert Risk Score. evidence_multiplier is a retired concept (see
+        # ml/risk_aggregator.py's module docstring — graph evidence is now a
+        # learned stacker input, not a separate rule-based multiplier);
+        # hardcoded to 1.0 here purely for schema/history compatibility with
+        # the risk_scores table's existing evidence_multiplier column.
         scoring_id = f"SCORE_{uuid.uuid4().hex[:8].upper()}"
         cursor.execute("""
             INSERT INTO risk_scores
-            (scoring_id, transaction_id, risk_score, tabular_score, gnn_score, velocity_multiplier, risk_tier, decision)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (scoring_id, transaction_id, risk_score, tabular_score, gnn_score, stacker_calibrated_score, velocity_multiplier, evidence_multiplier, risk_tier, decision)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             scoring_id, txn_id, risk_res["risk_score"], risk_res["tabular_score"],
-            risk_res["gnn_score"], risk_res["velocity_multiplier"], risk_res["risk_tier"], risk_res["decision"]
+            risk_res["gnn_score"], risk_res["stacker_calibrated_score"],
+            risk_res["velocity_multiplier"], 1.0,
+            risk_res["risk_tier"], risk_res["decision"]
         ))
 
         conn.commit()
         conn.close()
+
+        # Queue HITL only after the transaction and its risk record exist.
+        # This keeps the internal review queue consistent and makes the
+        # transaction_id FK resolvable on SQLite configurations that enforce FK checks.
+        review_id = enqueue_review(txn_id, risk_res)
+        risk_res["review_id"] = review_id
 
         # 4. Fold this transaction into the live in-memory graph immediately
         # (O(1) incremental update) so the Graph Topology tab reflects it
@@ -98,8 +122,14 @@ def score_transaction(payload: TransactionPayload):
         graph_builder.add_transaction(
             user_id=payload.user_id, device_id=payload.device_id, ip_address=payload.ip_address,
             merchant_id=payload.merchant_id, amount=payload.amount,
-            is_fraud=risk_res["risk_score"] >= 70.0
+            is_fraud=risk_res["risk_score"] >= HIGH_RISK_THRESHOLD
         )
+        # The just-committed transaction must be visible to the NEXT live GNN
+        # score. Without invalidation, the 20s graph snapshot could make rapid
+        # repeated transactions use stale device/IP/community evidence. The
+        # current request remains scored against the pre-insert graph, which
+        # prevents the transaction from influencing its own GNN score.
+        invalidate_live_graph_snapshot()
 
         return {
             "transaction_id": txn_id,
@@ -126,7 +156,9 @@ def get_recent_transactions(limit: int = 20, tier: Optional[str] = None):
 
     query = """
         SELECT t.transaction_id, t.user_id, t.device_id, t.ip_address, t.merchant_id, t.amount, t.timestamp,
-               r.risk_score, r.risk_tier, r.decision
+               t.velocity_1h, t.velocity_enabled, t.velocity_source,
+               r.risk_score, r.tabular_score, r.gnn_score, r.stacker_calibrated_score,
+               r.risk_tier, r.decision
         FROM transactions t
         LEFT JOIN risk_scores r ON t.transaction_id = r.transaction_id
     """
@@ -152,9 +184,15 @@ def get_recent_transactions(limit: int = 20, tier: Optional[str] = None):
             "merchant_id": r[4],
             "amount": r[5],
             "timestamp": r[6],
-            "risk_score": r[7] if r[7] is not None else 0.0,
-            "risk_tier": r[8] or "UNSCORED",
-            "decision": r[9] or "NONE"
+            "velocity_1h": r[7] if r[7] is not None else 0,
+            "velocity_enabled": bool(r[8]) if r[8] is not None else False,
+            "velocity_source": r[9] or ("CLIENT" if bool(r[8]) else "BACKEND"),
+            "risk_score": r[10] if r[10] is not None else 0.0,
+            "tabular_score": r[11] if r[11] is not None else 0.0,
+            "gnn_score": r[12] if r[12] is not None else 0.0,
+            "stacker_calibrated_score": r[13] if r[13] is not None else 0.0,
+            "risk_tier": r[14] or "UNSCORED",
+            "decision": r[15] or "NONE"
         })
 
     return {"count": len(result), "transactions": result}
