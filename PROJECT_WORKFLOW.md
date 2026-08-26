@@ -7,6 +7,27 @@ LLM is configured.
 
 ---
 
+## Workflow Diagram
+
+```mermaid
+flowchart LR
+    T[Incoming transaction] --> F[Feature engineering]
+    F --> V[Velocity]
+    F --> TM[Tabular ML]
+    F --> G[User-only graph]
+    G --> GN[GraphSAGE]
+    TM --> ST[Learned stacker]
+    GN --> ST
+    ST --> P[Risk aggregation + policy]
+    V --> P
+    P --> D{Decision}
+    D --> A[Approve / Hold / Block]
+    D --> H[HITL]
+    H --> I[Investigation + reviewer]
+    A --> AU[Audit]
+    I --> AU
+```
+
 ## 1. Mental Model & Core Architecture Shift
 
 There are **two graphs** in this codebase, deliberately kept separate:
@@ -41,40 +62,26 @@ ML Model -> Fraud Probability.
 
 ```mermaid
 flowchart TD
-    TXN["Incoming Payment Transaction"] --> GW["FastAPI Gateway"]
-
-    GW --> TAB["Tabular ML<br/>(XGBoost)"]
-    GW --> GNN["User Risk Graph + GNN"]
-    GW --> RULES["Velocity / Proxy Rules"]
-
-    TAB --> STACK["Learned Logistic<br/>Regression Stacker"]
+    TXN["Incoming Payment"] --> GW["FastAPI /transactions/score"]
+    GW --> VEL["Server-side 1h velocity count"]
+    VEL --> TAB["Tabular ML / XGBoost"]
+    GW --> GNN["User-only Risk Graph + GraphSAGE"]
+    TAB --> STACK["Learned Logistic Stacker"]
     GNN --> STACK
-
-    STACK --> CAL["Calibrated probability"]
-    CAL --> MULT["x Velocity/Proxy Multiplier<br/>(rule-based overlay)"]
-    RULES --> MULT
-    MULT --> SCORE["Risk Score (0-100)"]
-
-    SCORE --> Q{"Score >= 70?"}
-    Q -- No --> PASS["Pass"]
-    Q -- Yes --> AGENT["Investigation Agent"]
-
-    AGENT --> T1["GraphTool"]
-    AGENT --> T2["DeviceRiskTool"]
-    AGENT --> T3["TransactionHistoryTool"]
-    AGENT --> T4["FraudModelTool"]
-
-    T1 --> DECIDE{"LLM key configured?"}
-    T2 --> DECIDE
-    T3 --> DECIDE
-    T4 --> DECIDE
-
-    DECIDE -- Yes --> LLMR["LLM reasoning"]
-    DECIDE -- "No / failed" --> DETR["Deterministic fallback"]
-
-    LLMR --> REPORT["Explainable Audit Report<br/>Action: BLOCK / HOLD"]
-    DETR --> REPORT
+    STACK --> CAL["Stacker calibrated probability"]
+    CAL --> MULT["Velocity / proxy overlay<br/>(client-trust ON / backend-calc OFF)"]
+    MULT --> SCORE["Composite risk 0-100"]
+    SCORE --> POLICY["Decision Policy + guardrails"]
+    POLICY -->|automatic| DECIDE["APPROVE / MONITOR / HOLD / BLOCK"]
+    POLICY -->|HITL required| QUEUE["human_reviews: PENDING"]
+    QUEUE --> REVIEW["Human reviewer"]
+    SCORE --> PERSIST["transactions + risk_scores"]
+    PERSIST --> QUEUE
+    SCORE --> INV{"High risk or HITL?"}
+    INV -->|yes, separate call| AGENT["Investigation Agent"]
+    AGENT --> REPORT["Investigation report"]
 ```
+
 
 ---
 
@@ -87,7 +94,7 @@ flowchart TD
 
 2. Database Schema & Data Models
    - db/schema.sql
-   - db/database.py             raw sqlite3 only — see §4 bug #12 for why the earlier SQLAlchemy path is gone
+   - db/database.py             raw sqlite3 only — see the Bugs & Regression History section for why the earlier SQLAlchemy path is gone
 
 3. Synthetic Data & Fraud Scenarios
    - data/generate_synthetic_data.py    each user has ONE dedicated device/IP + benign co-location noise
@@ -136,47 +143,49 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant API as routes_transactions.py
-    participant TAB as Tabular Model
-    participant GNN as Risk Graph + GNN
-    participant AGG as Risk Aggregator (Stacker)
-    participant AGT as Investigation Agent
+    participant API as Transactions API
+    participant TAB as Tabular ML
+    participant GNN as GraphSAGE
+    participant AGG as Stacker / Risk Aggregator
+    participant POL as Decision Policy
     participant DB as SQLite
-    participant LOG as logs/*.log
+    participant HITL as Human Review Queue
+    participant AGT as Investigation Agent
+    participant LOG as Audit Logs
 
     C->>API: POST /transactions/score
-    API->>LOG: bind_correlation_id()
-    API->>TAB: live_tabular_score(txn)
-    TAB-->>API: tabular_score
-    API->>GNN: live_gnn_score_and_evidence(user_id)
-    GNN-->>API: gnn_score + graph evidence
-    API->>AGG: stacker(tabular_score, gnn_score) + velocity/proxy overlay
-    AGG-->>API: risk_score, tier, decision
-    API->>DB: persist transaction + risk score
-    API-->>C: risk_evaluation + needs_investigation + correlation_id
-    Note over C,API: Risk score renders immediately — client does NOT<br/>wait on the agent before showing the gauge/tier/evidence.
-    opt needs_investigation == true
-        C->>API: POST /investigations/run/{txn_id}  (separate follow-up call)
-        API->>AGT: investigate(txn, risk_summary)
-        AGT->>AGT: gather evidence (4 deterministic tools)
-        alt LLM key configured
-            AGT->>AGT: LLM reasons over evidence
-        else no key / call failed
-            AGT->>AGT: deterministic fallback rules
-        end
-        AGT-->>API: investigation report (agent_mode labeled)
-        API->>DB: persist investigation report
-        API-->>C: report (rendered client-side via marked.js)
+    API->>AGG: score transaction
+    AGG->>DB: count prior txns in trailing 1h
+    AGG->>TAB: score behavioral features
+    AGG->>GNN: score user graph node
+    TAB-->>AGG: Tabular ML score
+    GNN-->>AGG: GNN node-embedding score
+    AGG->>AGG: learned stacker -> calibrated score
+    AGG->>AGG: optional velocity/proxy overlay
+    AGG->>POL: composite risk + evidence
+    POL-->>API: decision + HITL policy result
+    API->>DB: persist transaction + all 3 model scores
+    alt HITL required
+        API->>HITL: enqueue PENDING review after DB commit
+        HITL-->>C: review_id returned
     end
-    API->>LOG: every step logged with the same correlation ID
+    API-->>C: risk evaluation + correlation_id
+    API->>LOG: model scores + velocity + decision
+    opt investigation requested
+        C->>API: POST /investigations/run/{txn_id}
+        API->>AGT: gather evidence + investigate
+        AGT->>DB: persist investigation report
+        AGT-->>C: investigation report
+    end
 ```
+
 
 ### Step 1: Request Ingestion (`api/routes_transactions.py`)
 `POST /api/v1/transactions/score` receives a transaction payload and immediately calls
 `bind_correlation_id()` — every log line emitted anywhere in the next 4 steps carries this same ID.
 
-### Step 2: Tabular ML Fraud Scoring (`ml/risk_aggregator.py::live_tabular_score`)
-- Computes the exact same 6 features used at training time (`amount_log`, `hour_of_day`, `day_of_week`,
+### Step 2: Velocity Source Selection and Tabular ML Fraud Scoring (`ml/risk_aggregator.py`)
+- Selects hourly velocity from the explicit frontend source toggle: client-provided in trust mode, or server-computed from the trailing-1h transaction history in backend mode. The selected value then feeds the same model features used at training time (`amount_log`, `hour_of_day`, `day_of_week`,
   `velocity_1h`, `amount_zscore_prior`, `merchant_fraud_rate`) from live DB queries — `amount_zscore_prior` and
   `merchant_fraud_rate` both use ONLY information available before this transaction (prior transactions' mean/
   std, and merchant rates fit only on the training split).
@@ -184,9 +193,7 @@ sequenceDiagram
   fallback) model.
 
 ### Step 3: Graph & GNN Node Scoring (`ml/risk_aggregator.py::live_gnn_score_and_evidence`)
-- Rebuilds the canonical User-only risk graph (`ml/risk_graph.py::build_user_graph`) from current DB contents —
-  cheap at this dataset's scale (a few thousand nodes, pure NumPy/SQL), flagged in the code as the piece a real
-  production system would move to a scheduled/cached job instead of recomputing synchronously per request.
+- Rebuilds the canonical User-only risk graph (`ml/risk_graph.py::build_user_graph`) from current DB contents when the live snapshot is missing/invalidated or its TTL expires. The API invalidates the snapshot after every committed transaction so rapid repeated payments cannot score against stale device/IP/community topology.
 - Runs one **inductive** forward pass (`GraphSAGEInference.score_all`) with the already-trained weights over
   whatever the current graph looks like — any user present gets a real score, including ones added after
   training, no cache and no fallback heuristic needed.
@@ -205,8 +212,8 @@ sequenceDiagram
   - `70.0 – 89.9`: `HIGH` → `HOLD_FOR_INVESTIGATION`
   - `90.0 – 100.0`: `CRITICAL` → `BLOCK_AND_INVESTIGATE`
 
-### Step 5: Automatic Agent Dispatch, as a Separate Follow-Up Call (`agent/graph_agent.py`)
-- If Risk Score ≥ 70.0, `/api/v1/transactions/score` returns `needs_investigation: true` **without** running the
+### Step 5: Policy, HITL Queue, and Separate Investigation Dispatch (`agent/graph_agent.py`)
+- If Risk Score ≥ 70.0 **or HITL policy requires review**, `/api/v1/transactions/score` returns `needs_investigation: true` **without** running the
   investigation itself — the risk score, tier, and evidence render in the dashboard immediately. The frontend
   (`static/js/app.js`) then fires a separate `POST /api/v1/investigations/run/{transaction_id}` and fills in the
   report panel once that resolves. This split exists because the investigation step is materially slower than
@@ -224,11 +231,17 @@ sequenceDiagram
   looks like" vs. "this is the fallback" on demand, without needing different API keys configured.
 
 ### Step 6: Database Persistence & Log Streaming (`db/database.py` & `utils/logger.py`)
-- Saves transaction, risk score, and investigation report to SQLite (`db/database.py` — see §4's bug #12 for why an earlier parallel Postgres-via-`DATABASE_URL` path was removed rather than kept half-wired).
+- Saves transaction, risk score, and investigation report to SQLite (`db/database.py`). The application uses one raw-SQLite data path.
 - Logs route to 8 subsystem channels: `app`, `risk_engine`, `agent`, `ml_training`, `graph`, `database`,
   `pipeline`, `frontend_client` — every line for this request carries the correlation ID from Step 1.
 - The live in-memory dashboard graph gets this one transaction folded in incrementally
   (`graph_builder.add_transaction`) — no full rebuild needed for a single live score.
+
+### Step 6b: Human-in-the-Loop Queue (`api/routes_hitl.py`)
+- `apply_decision_policy()` can trigger `MODEL_UNCERTAINTY`, `MODEL_DISAGREEMENT`, `HIGH_IMPACT`, `EVIDENCE_CONFLICT`, or `NOVEL_BEHAVIOR`.
+- The API commits the transaction and risk record first, then creates an idempotent `PENDING` row in `human_reviews`.
+- The dashboard refreshes the queue after every score and exposes `APPROVE`, `HOLD`, and `BLOCK` reviewer actions.
+- A review is not an external email/task-system integration; it is an internal RazorRisk reviewer queue backed by SQLite.
 
 ### Step 7: Dashboard UI Update (`static/js/app.js` & `static/js/graph_vis.js`)
 - Updates the risk gauge (color driven by actual tier, not hardcoded red) and the three model-breakdown bars —
@@ -283,12 +296,10 @@ regardless of configuration. The working split:
 - **Bug #12 — an auto-detector caught a real architectural leftover.** Antideploy reads `requirements.txt` to
   infer what infrastructure an app needs, saw `asyncpg`/`psycopg2-binary`, and offered to provision a Postgres
   database. That correctly reflected what the dependency list *implied* — a parallel SQLAlchemy engine +
-  `db/models.py` ORM models existed specifically to support Postgres via `DATABASE_URL` — but it was dead code:
+  a historical `db/models.py` ORM path existed specifically to support Postgres via `DATABASE_URL` — but it was dead code:
   every actual query in the entire app (`api/`, `ml/`, `data/`, `agent/`) went through
   `get_raw_sqlite_connection()`, a raw `sqlite3` connection that doesn't even speak Postgres. The auto-detector
-  wasn't wrong about the dependency; the dependency was the bug. Removed `db/models.py`, the SQLAlchemy engine
-  code in `db/database.py`, and the `sqlalchemy`/`asyncpg`/`psycopg2-binary` packages from `requirements.txt`
-  entirely, rather than leave a second, decorative data layer that nothing used.
+  wasn't wrong about the dependency; the application-owned ORM path was the bug. Removed `db/models.py` and the SQLAlchemy engine code, and removed the direct SQLAlchemy dependency from project requirements. LangChain may still install SQLAlchemy transitively, but RazorRisk itself does not use an ORM.
 - **Bug #13 — the `/tmp` redirect (bug #10) didn't recognize Cloud Run.** Antideploy runs on Google Cloud Run,
   which has the same ephemeral-filesystem characteristics as Vercel (wiped on redeploy) but wasn't in the
   original serverless-detection check — only `VERCEL` and (later) `SPACE_ID` were. `IS_RESTRICTED_FS` now also
@@ -299,12 +310,31 @@ Full step-by-step deploy instructions for all platforms are in `README.md`'s **D
 
 ---
 
+## 4.5 Bugs & Regression History
+
+These are the concrete problems found during manual and automated validation. Each is now either fixed in the implementation or explicitly represented as a disclosed GAP in the golden matrix.
+
+### Bug #14 — Velocity test looked inverted
+The dashboard sorts recent transactions newest-first. A manual test that displayed 15 repeated transactions therefore showed the latest transaction at row 1. In addition, reusing an identity from an earlier test meant its graph/history state was not clean. The apparent `100 → 0.1 → 0.1 ...` pattern was therefore not proof that the first transaction had risk 100 or that velocity was decreasing. Regression tests now verify the chronological backend count directly.
+
+### Bug #15 — Velocity source semantics were ambiguous
+The desired behavior is a frontend source toggle, not a hidden server override. **ON** intentionally trusts `velocity_1h` for simulation/testing; **OFF** ignores any client value and computes trailing-one-hour velocity from persisted transactions. The effective source and value are persisted and audited.
+
+### Bug #16 — HUMAN_REVIEW was a decision without a guaranteed work item
+A transaction could be labeled `HUMAN_REVIEW` while the queue was not yet guaranteed to contain a usable review record. The fixed sequence is: commit transaction → commit risk score → enqueue idempotent `PENDING` review → return `review_id`. Reviewer resolution changes the risk decision to `APPROVE`, `HOLD`, or `BLOCK`.
+
+### Bug #17 — GNN topology could lag behind rapid transactions
+Backend velocity was calculated from fresh database state while the GNN could still be using a short-lived cached graph snapshot. The snapshot is now invalidated after every committed transaction (fixing the stale GNN topology bug). The current transaction is deliberately scored against the pre-insert graph to avoid self-influence; the next transaction sees the updated topology.
+
+### Regression contract
+`tests/test_regressions.py` turns the above findings into executable checks. `tests/test_risk_engine.py` covers the broader scoring pipeline, while `tests/GOLDEN_TEST_MATRIX.md` documents scenario-level PASS/PARTIAL/GAP expectations.
+
 ## 5. Deep-Dive Component Map
 
 ### A. Database Layer (`db/`)
 - `schema.sql` — `users`, `devices`, `ip_addresses`, `merchants`, `transactions`, `risk_scores`,
-  `investigation_reports`, `system_logs`.
-- `database.py` — raw `sqlite3` connection helper + schema init. An earlier SQLAlchemy/Postgres-via-`DATABASE_URL` path existed here but was dead code (nothing ever queried through it) and got removed — see §4's bug #12.
+  `investigation_reports`, `human_reviews`, `system_logs`.
+- `database.py` — raw `sqlite3` connection helper + schema init. One application-owned SQLite data path.
 
 ### B. Synthetic Data & Fraud Ring Generator (`data/generate_synthetic_data.py`)
 Generates ~12,000 transactions. Each normal user gets **their own dedicated device + IP** (a person doesn't
@@ -373,3 +403,17 @@ transactions, and merchant collusion.
 
 5. **The Deployment Split — a Real Constraint, Not a Preference**:
    > *"XGBoost, SciPy, and the LangChain provider packages together install to about 2GB, and Vercel's serverless Python functions cap out around 250MB unzipped — so the backend was never going to run there as a function no matter how I configured it. I run the backend on Render, a real persistent process, and optionally mirror just the static dashboard on Vercel pointed at the Render URL over CORS. That decision also surfaced a real bug: the raw SQLite connection helper had a hardcoded path that happened to agree with the SQLAlchemy engine's path locally and on Render, but would have silently diverged — and crashed every write — the moment I tried running any part of this somewhere with a read-only filesystem. Now there's one source of truth for that path instead of two that happened to match."*
+
+---
+
+## Evaluation Reproduction Contract
+
+The checked-in evaluation runner is the source of truth for README model metrics:
+
+```bash
+python tests/evaluate_models.py --dataset synthetic
+python tests/evaluate_models.py --dataset synthetic --retrain
+python tests/evaluate_models.py --dataset kaggle --csv data/creditcard.csv
+```
+
+Synthetic evaluation compares the tabular model, the user-level GraphSAGE score projected onto the same held-out transaction rows, and the learned stacker. The public ULB/Kaggle dataset is evaluated separately as a tabular benchmark because it contains no stable user/device/IP relationships. Graph claims are therefore restricted to the synthetic relational benchmark.
