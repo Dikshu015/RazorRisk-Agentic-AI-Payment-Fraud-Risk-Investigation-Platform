@@ -57,3 +57,11 @@ DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
 
 # Risk threshold triggering agent investigation
 HIGH_RISK_THRESHOLD = 70.0
+
+# Rolling window (days) for the amount_zscore_prior feature (both offline
+# training in ml/train_tabular_model.py and live scoring in
+# ml/risk_aggregator.py use this SAME constant) — a user's "normal" amount
+# is judged against their trailing 90 days, not their entire lifetime.
+# Keeping this in one place is what keeps train-time and live-scoring-time
+# feature computation from silently drifting apart.
+PRIOR_AMOUNT_WINDOW_DAYS = int(os.getenv("PRIOR_AMOUNT_WINDOW_DAYS", 90))
