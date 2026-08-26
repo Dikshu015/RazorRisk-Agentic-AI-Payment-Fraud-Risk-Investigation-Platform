@@ -1,0 +1,160 @@
+"""
+Executable verification of tests/GOLDEN_TEST_MATRIX.md — runs real
+transactions through the actual trained model (calculate_composite_risk_
+score) and checks the resulting tier against what the matrix says it
+should be. This is the difference between "the generator's docstring says
+this scenario is benign" and "the trained model actually scores it LOW."
+
+Requires a trained model in ml/models/ (run ml.risk_aggregator.
+train_stacker() first — the admin pipeline endpoints, or the CLI, do this).
+This suite does NOT retrain on every run (training takes real time); it
+scores against whatever is currently trained, same as live traffic would.
+
+Only test IDs marked PASS in GOLDEN_TEST_MATRIX.md are asserted here — GAP
+and PARTIAL rows are intentionally not modeled yet and asserting against
+them would either be untestable or would codify a known limitation as if
+it were a requirement. See the matrix file for the full disclosure.
+"""
+import unittest
+
+from ml.risk_aggregator import calculate_composite_risk_score, HIGH_RISK_THRESHOLD, MEDIUM_THRESHOLD
+
+
+def _latest_txn_context(user_id: str) -> tuple[str, str]:
+    """Returns (device_id, ip_address) from user_id's most recent
+    transaction, so tests don't have to hardcode identifiers that could
+    drift from the generator."""
+    from db.database import get_raw_sqlite_connection
+    conn = get_raw_sqlite_connection()
+    row = conn.execute(
+        "SELECT device_id, ip_address FROM transactions WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1",
+        (user_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise AssertionError(f"No transactions found for {user_id} — was generate_dataset() run?")
+    return row
+
+
+class TestGoldenMatrixBenign(unittest.TestCase):
+    """Section 1/6/7 BENIGN rows (N01-N27, G02/G04/G05/G07/G08) — expect LOW."""
+
+    def _assert_low(self, user_id, merchant_id, amount, is_vpn=False):
+        device_id, ip_address = _latest_txn_context(user_id)
+        txn = {"user_id": user_id, "device_id": device_id, "ip_address": ip_address,
+               "merchant_id": merchant_id, "amount": amount, "is_vpn_proxy": is_vpn}
+        r = calculate_composite_risk_score(txn)
+        self.assertEqual(r["risk_tier"], "LOW",
+                          f"{user_id}: expected LOW, got {r['risk_tier']} (score={r['risk_score']})")
+
+    def test_N01_N04_family_shared_device(self):
+        self._assert_low("USER_FAMILY_1", "MCH_003", 800)
+
+    def test_N02_N22_G02_hostel_shared_ip(self):
+        self._assert_low("USER_HOSTEL_1", "MCH_003", 300)
+
+    def test_N05_N21_carrier_nat(self):
+        self._assert_low("USER_CARRIER_2", "MCH_005", 400)
+
+    def test_N03_N11_N27_event_spike(self):
+        self._assert_low("USER_EVENT_5", "MCH_020", 900)
+
+    def test_N07_N19_shared_office_device(self):
+        self._assert_low("USER_SHAREDDEV_2", "MCH_010", 300)
+
+    def test_N06_N15_N25_G07_G08_popular_merchant(self):
+        self._assert_low("USER_POPMCH_5", "MCH_020", 500)
+
+    def test_N09_N12_N14_recurring_monthly(self):
+        self._assert_low("USER_RECURRING_1", "MCH_020", 900)
+
+    def test_N16_unusual_amount_no_other_anomaly(self):
+        # Spec says "MEDIUM or ALLOW" (GOLDEN_TEST_MATRIX.md N16), not
+        # strictly LOW — a genuinely unusual amount is allowed to raise
+        # some caution, just not escalate to HIGH/CRITICAL the way actual
+        # fraud does. See generate_synthetic_data.py's comment on this
+        # scenario for the earlier, more extreme version that DID cross
+        # into HIGH — an honest empirical result, not a bug, showing where
+        # amount_zscore_prior alone stops being separable from fraud.
+        device_id, ip_address = _latest_txn_context("USER_FAMILY_1")
+        txn = {"user_id": "USER_FAMILY_1", "device_id": device_id, "ip_address": ip_address,
+               "merchant_id": "MCH_020", "amount": 7500}
+        r = calculate_composite_risk_score(txn)
+        self.assertLess(r["risk_score"], HIGH_RISK_THRESHOLD,
+                         f"expected below HIGH ({HIGH_RISK_THRESHOLD}), got {r['risk_score']} ({r['risk_tier']})")
+
+    def test_bill_split_benign(self):
+        self._assert_low("USER_BILLSPLIT_2", "MCH_020", 500)
+
+
+class TestGoldenMatrixFraud(unittest.TestCase):
+    """Section 1/6/7 FRAUD rows — expect HIGH or CRITICAL (>= HIGH_RISK_THRESHOLD)."""
+
+    def _assert_high_or_critical(self, user_id, merchant_id, amount, is_vpn=True):
+        device_id, ip_address = _latest_txn_context(user_id)
+        txn = {"user_id": user_id, "device_id": device_id, "ip_address": ip_address,
+               "merchant_id": merchant_id, "amount": amount, "is_vpn_proxy": is_vpn}
+        r = calculate_composite_risk_score(txn)
+        self.assertGreaterEqual(r["risk_score"], HIGH_RISK_THRESHOLD,
+                                 f"{user_id}: expected >= {HIGH_RISK_THRESHOLD}, got {r['risk_score']} ({r['risk_tier']})")
+
+    def test_P01_P04_P05_G01_G03_ring1_device_farm(self):
+        self._assert_high_or_critical("USER_RING1_1", "MCH_042", 88000)
+
+    def test_P02_P26_P27_ring2_ip_proxy(self):
+        self._assert_high_or_critical("USER_RING2_1", "MCH_042", 45000)
+
+    def test_P07_P13_P15_P24_account_takeover(self):
+        # Hijack transaction specifically — its device/ip differ from the
+        # user's normal history, which is the whole point of this scenario.
+        from db.database import get_raw_sqlite_connection
+        conn = get_raw_sqlite_connection()
+        row = conn.execute(
+            "SELECT device_id, ip_address, amount FROM transactions "
+            "WHERE user_id = 'USER_ATO_1' AND is_fraud_ground_truth = 1 LIMIT 1"
+        ).fetchone()
+        conn.close()
+        device_id, ip_address, amount = row
+        txn = {"user_id": "USER_ATO_1", "device_id": device_id, "ip_address": ip_address,
+               "merchant_id": "MCH_SUSPICIOUS_99", "amount": amount}
+        r = calculate_composite_risk_score(txn)
+        self.assertGreaterEqual(r["risk_score"], MEDIUM_THRESHOLD,
+                                 f"expected at least MEDIUM (spec says MEDIUM-HIGH), got {r['risk_score']} ({r['risk_tier']})")
+
+    def test_P08_P16_P17_structuring(self):
+        self._assert_high_or_critical("USER_STRUCT_1", "MCH_010", 96000)
+
+    def test_P11_cold_start_fraud(self):
+        self._assert_high_or_critical("USER_COLDSTART_FRAUD_1", "MCH_SUSPICIOUS_99", 80000, is_vpn=False)
+
+    def test_P18_P20_fan_out_launder(self):
+        self._assert_high_or_critical("USER_FANOUT_LAUNDER", "MCH_015", 42000)
+
+    def test_P30_P31_merchant_collusion_ring4(self):
+        self._assert_high_or_critical("USER_COLLUSION_1", "MCH_SUSPICIOUS_99", 60000, is_vpn=False)
+
+    def test_G10_isolated_user_tabular_dominates(self):
+        # No graph connectivity at all — this specifically checks the
+        # tabular signal carries detection without any GNN/graph help.
+        self._assert_high_or_critical("USER_NOINFRA_1", "MCH_SUSPICIOUS_99", 80000, is_vpn=False)
+
+
+class TestGoldenMatrixDocumentedGaps(unittest.TestCase):
+    """Not assertions — a machine-checkable inventory that every GAP claimed
+    in GOLDEN_TEST_MATRIX.md still has no corresponding synthetic user, so
+    the matrix doc can't silently go stale by someone adding the scenario
+    later without updating the doc's status column."""
+
+    def test_no_device_reputation_scenario_exists(self):
+        # P22 gap: no scenario tests "device previously linked to confirmed
+        # fraud." If this ever starts passing, update the matrix doc's
+        # status for P22/P28/G09 from GAP to PASS (or add scenario+test).
+        from db.database import get_raw_sqlite_connection
+        conn = get_raw_sqlite_connection()
+        row = conn.execute("SELECT 1 FROM users WHERE user_id LIKE 'USER_DEVICEREP%' LIMIT 1").fetchone()
+        conn.close()
+        self.assertIsNone(row, "A device-reputation scenario now exists — update GOLDEN_TEST_MATRIX.md's P22/P28/G09 status.")
+
+
+if __name__ == "__main__":
+    unittest.main()

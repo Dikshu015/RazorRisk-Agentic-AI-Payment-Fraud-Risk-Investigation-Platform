@@ -43,6 +43,7 @@ class TestRazorRiskEngine(unittest.TestCase):
         sample_features = {
             "amount_log": 11.35, "hour_of_day": 3, "day_of_week": 2,
             "velocity_1h": 10, "amount_zscore_prior": 3.5, "merchant_fraud_rate": 0.3,
+            "distinct_devices_7d": 2, "distinct_merchants_1h": 1,
         }
         tab_score = predict_tabular_fraud_prob(sample_features)
         self.assertGreaterEqual(tab_score, 0.0)
@@ -78,6 +79,86 @@ class TestRazorRiskEngine(unittest.TestCase):
         # assertion is mode-agnostic on purpose — it should still pass if
         # the test runs somewhere with ANTHROPIC_API_KEY set.
         self.assertTrue(len(agent_res["fraud_hypothesis"]) > 20)
+
+
+    def test_07_velocity_source_toggle_client_vs_backend(self):
+        base = {
+            "transaction_id": "TXN_VELOCITY_TOGGLE",
+            "user_id": "USER_RING1_1",
+            "device_id": "DEV_FRAUD_RING1",
+            "ip_address": "185.220.101.44",
+            "merchant_id": "MCH_042",
+            "amount": 95000,
+            "is_vpn_proxy": False,
+            "is_suspicious_proxy": False,
+        }
+        client = calculate_composite_risk_score({**base, "velocity_enabled": True, "velocity_1h": 999})
+        backend = calculate_composite_risk_score({**base, "velocity_enabled": False, "velocity_1h": 999})
+        self.assertEqual(client["velocity_enabled"], True)
+        self.assertEqual(client["velocity_source"], "CLIENT")
+        self.assertEqual(client["velocity_1h"], 999)
+        self.assertEqual(client["effective_velocity_1h"], 999)
+        self.assertEqual(backend["velocity_enabled"], False)
+        self.assertEqual(backend["velocity_source"], "BACKEND")
+        self.assertNotEqual(backend["velocity_1h"], 999)
+        # OFF means backend calculation; the client value is ignored.
+        self.assertEqual(backend["effective_velocity_1h"], backend["velocity_1h"])
+
+    def test_08_backend_velocity_increases_with_persisted_transactions(self):
+        user_id = "USER_VELOCITY_SEQUENCE_TEST"
+        device_id = "DEV_VELOCITY_SEQUENCE_TEST"
+        ip_address = "10.254.254.10"
+        merchant_id = "MCH_041"
+        conn = get_raw_sqlite_connection()
+        conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+
+        observed = []
+        try:
+            for i in range(1, 6):
+                txn_id = f"TXN_VELOCITY_SEQUENCE_{i}"
+                risk = calculate_composite_risk_score({
+                    "transaction_id": txn_id,
+                    "user_id": user_id,
+                    "device_id": device_id,
+                    "ip_address": ip_address,
+                    "merchant_id": merchant_id,
+                    "amount": 1000,
+                    "velocity_enabled": False,
+                })
+                observed.append(risk["velocity_1h"])
+                self.assertEqual(risk["velocity_source"], "BACKEND")
+                conn = get_raw_sqlite_connection()
+                conn.execute(
+                    """INSERT INTO transactions
+                    (transaction_id, user_id, device_id, ip_address, merchant_id, amount, currency, timestamp, status, velocity_1h, velocity_enabled, velocity_source, amount_zscore_prior)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 'COMPLETED', ?, 0, 'BACKEND', ?)""",
+                    (txn_id, user_id, device_id, ip_address, merchant_id, 1000, "INR", risk["velocity_1h"], risk["amount_zscore_prior"]),
+                )
+                conn.commit()
+                conn.close()
+            self.assertEqual(observed, [1, 2, 3, 4, 5])
+        finally:
+            conn = get_raw_sqlite_connection()
+            conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+
+    def test_09_audit_output_contains_all_three_scores(self):
+        risk = calculate_composite_risk_score({
+            "transaction_id": "TXN_AUDIT_SCORES",
+            "user_id": "USER_RING1_1",
+            "device_id": "DEV_FRAUD_RING1",
+            "ip_address": "185.220.101.44",
+            "merchant_id": "MCH_042",
+            "amount": 95000,
+            "velocity_enabled": False,
+        })
+        for key in ("tabular_score", "gnn_score", "stacker_calibrated_score"):
+            self.assertIn(key, risk)
+            self.assertGreaterEqual(risk[key], 0.0)
+            self.assertLessEqual(risk[key], 100.0)
 
     def test_06_logging_file_generation(self):
         self.assertTrue(APP_LOG_PATH.exists(), "app.log should be created.")
