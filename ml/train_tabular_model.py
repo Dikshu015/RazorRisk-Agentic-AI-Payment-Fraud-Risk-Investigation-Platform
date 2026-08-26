@@ -34,6 +34,7 @@ import pandas as pd
 
 from ml.common import user_level_split, classification_report_dict
 from db.database import get_raw_sqlite_connection
+from config import PRIOR_AMOUNT_WINDOW_DAYS
 from utils.logger import get_logger
 
 logger = get_logger("tabular_training")
@@ -50,14 +51,42 @@ MERCHANT_SMOOTHING = 10  # additive smoothing strength for target encoding
 FEATURES = [
     "amount_log", "hour_of_day", "day_of_week",
     "velocity_1h", "amount_zscore_prior", "merchant_fraud_rate",
+    "distinct_devices_7d", "distinct_merchants_1h",
 ]
 
-# Leak-free feature SQL: velocity_1h is a correlated subquery counting only
-# transactions at-or-before the current one within the trailing hour;
-# prior_avg/prior_std use a ROWS frame ending one row BEFORE the current
-# transaction. SQLite has no built-in STDDEV, so it's computed by hand from
-# the window SUM/SUM-of-squares/COUNT over the same frame.
-FEATURE_SQL = """
+# Leak-free feature SQL — every correlated subquery below only looks at
+# transactions strictly at-or-before the current one, so no feature ever
+# sees the future.
+#
+# velocity_1h: trailing 1-hour window.
+#
+# prior_count/prior_sum/prior_sumsq (-> amount_zscore_prior, computed in
+# load_transactions below): bounded to a rolling PRIOR_AMOUNT_WINDOW_DAYS
+# window (default 90), matching ml/risk_aggregator.py's live_tabular_score()
+# exactly — train time and live-scoring time must compute this the same way
+# or the model sees one feature distribution during training and a subtly
+# different one at inference. Correlated subqueries replace what could be a
+# SQLite WINDOW ... RANGE clause, because SQLite's window frames don't
+# support arbitrary date-interval bounds — only row-count/numeric offsets —
+# so a time-bounded rolling window has to be a subquery instead. Fine at
+# this dataset's scale (low thousands of rows).
+#
+# distinct_devices_7d: velocity_1h is a single fixed 60-minute window — an
+# actor who paces transactions more than an hour apart resets it to
+# near-zero even mid-pattern (this is exactly what Ring 5 in the synthetic
+# generator does: escalate for an hour, go quiet, then probe from new
+# devices). Counting distinct device fingerprints used by the SAME user over
+# a much longer 7-day trailing window survives that pacing evasion, since a
+# person switching through 3+ device fingerprints in a week is rare
+# regardless of how the transactions are spaced in time.
+#
+# distinct_merchants_1h: the missing signal that lets the model tell "5
+# transactions to 5 different merchants" (a busy but ordinary shopping run)
+# apart from "5 transactions to the SAME merchant" (card-testing/probing, or
+# a structured repeated payment) — velocity_1h alone treats both identically
+# since it only counts transactions, not who they went to. Same trailing-1h
+# window as velocity_1h.
+FEATURE_SQL = f"""
 SELECT
     t.transaction_id,
     t.user_id,
@@ -73,14 +102,37 @@ SELECT
           AND t2.timestamp <= t.timestamp
           AND t2.timestamp > datetime(t.timestamp, '-1 hours')
     ) AS velocity_1h,
-    SUM(t.amount) OVER w AS prior_sum,
-    SUM(t.amount * t.amount) OVER w AS prior_sumsq,
-    COUNT(t.amount) OVER w AS prior_count
+    (
+        SELECT COUNT(DISTINCT t4.merchant_id) FROM transactions t4
+        WHERE t4.user_id = t.user_id
+          AND t4.timestamp <= t.timestamp
+          AND t4.timestamp > datetime(t.timestamp, '-1 hours')
+    ) AS distinct_merchants_1h,
+    (
+        SELECT COUNT(t2.amount) FROM transactions t2
+        WHERE t2.user_id = t.user_id
+          AND t2.timestamp < t.timestamp
+          AND t2.timestamp > datetime(t.timestamp, '-{PRIOR_AMOUNT_WINDOW_DAYS} days')
+    ) AS prior_count,
+    (
+        SELECT SUM(t2.amount) FROM transactions t2
+        WHERE t2.user_id = t.user_id
+          AND t2.timestamp < t.timestamp
+          AND t2.timestamp > datetime(t.timestamp, '-{PRIOR_AMOUNT_WINDOW_DAYS} days')
+    ) AS prior_sum,
+    (
+        SELECT SUM(t2.amount * t2.amount) FROM transactions t2
+        WHERE t2.user_id = t.user_id
+          AND t2.timestamp < t.timestamp
+          AND t2.timestamp > datetime(t.timestamp, '-{PRIOR_AMOUNT_WINDOW_DAYS} days')
+    ) AS prior_sumsq,
+    (
+        SELECT COUNT(DISTINCT t3.device_id) FROM transactions t3
+        WHERE t3.user_id = t.user_id
+          AND t3.timestamp <= t.timestamp
+          AND t3.timestamp > datetime(t.timestamp, '-7 days')
+    ) AS distinct_devices_7d
 FROM transactions t
-WINDOW w AS (
-    PARTITION BY t.user_id ORDER BY t.timestamp
-    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-)
 ORDER BY t.transaction_id
 """
 
