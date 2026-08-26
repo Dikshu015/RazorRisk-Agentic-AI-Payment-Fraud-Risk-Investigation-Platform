@@ -1,3 +1,4 @@
+function escapeHtml(value) { const d=document.createElement('div'); d.textContent=String(value ?? ''); return d.innerHTML; }
 // Report uncaught frontend errors into the server-side audit trail
 // (logs/frontend_client.log) instead of a browser console only the person
 // hitting the bug ever sees — best-effort, never throws itself.
@@ -24,6 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadRecentTransactions();
     loadAgentStatus();
     refreshLogStream();
+    initVelocitySourceToggle();
 
     // Form submit listener
     const form = document.getElementById('scoring-form');
@@ -53,9 +55,28 @@ function initTabs() {
                 loadRecentTransactions();
             } else if (tabId === 'agent') {
                 loadAgentStatus();
+            } else if (tabId === 'hitl') {
+                loadHITLQueue();
             }
         });
     });
+}
+
+function updateVelocitySourceUI() {
+    const toggle = document.getElementById('velocity_enabled');
+    const label = document.getElementById('velocity-source-label');
+    const wrap = document.getElementById('client-velocity-wrap');
+    if (!toggle || !label || !wrap) return;
+    const clientMode = toggle.checked;
+    label.textContent = clientMode ? 'ON · Trust client-provided velocity' : 'OFF · Calculate from backend history';
+    wrap.style.display = clientMode ? 'block' : 'none';
+}
+
+function initVelocitySourceToggle() {
+    const toggle = document.getElementById('velocity_enabled');
+    if (!toggle) return;
+    toggle.addEventListener('change', updateVelocitySourceUI);
+    updateVelocitySourceUI();
 }
 
 // Preset Scenario Handlers
@@ -65,8 +86,8 @@ function loadPreset(type) {
         document.getElementById('device_id').value = 'DEV_0088';
         document.getElementById('ip_address').value = '192.168.12.45';
         document.getElementById('amount').value = '1250';
-        document.getElementById('velocity_1h').value = '1';
         document.getElementById('merchant_id').value = 'MCH_005';
+        document.getElementById('velocity_enabled').checked = false; updateVelocitySourceUI();
         document.getElementById('is_vpn_proxy').checked = false;
         document.getElementById('is_suspicious_proxy').checked = false;
     } else if (type === 'ring1') {
@@ -74,8 +95,8 @@ function loadPreset(type) {
         document.getElementById('device_id').value = 'DEV_FRAUD_RING1';
         document.getElementById('ip_address').value = '185.220.101.44';
         document.getElementById('amount').value = '88000';
-        document.getElementById('velocity_1h').value = '12';
         document.getElementById('merchant_id').value = 'MCH_042';
+        document.getElementById('velocity_enabled').checked = false; updateVelocitySourceUI();
         document.getElementById('is_vpn_proxy').checked = true;
         document.getElementById('is_suspicious_proxy').checked = true;
     } else if (type === 'ring2') {
@@ -83,8 +104,8 @@ function loadPreset(type) {
         document.getElementById('device_id').value = 'DEV_RING2_USER_RING2_1';
         document.getElementById('ip_address').value = '198.51.100.99';
         document.getElementById('amount').value = '95000';
-        document.getElementById('velocity_1h').value = '8';
         document.getElementById('merchant_id').value = 'MCH_042';
+        document.getElementById('velocity_enabled').checked = false; updateVelocitySourceUI();
         document.getElementById('is_vpn_proxy').checked = true;
         document.getElementById('is_suspicious_proxy').checked = true;
     } else if (type === 'carding') {
@@ -92,8 +113,8 @@ function loadPreset(type) {
         document.getElementById('device_id').value = 'DEV_CARDER_X';
         document.getElementById('ip_address').value = '203.0.113.50';
         document.getElementById('amount').value = '49';
-        document.getElementById('velocity_1h').value = '15';
         document.getElementById('merchant_id').value = 'MCH_012';
+        document.getElementById('velocity_enabled').checked = false; updateVelocitySourceUI();
         document.getElementById('is_vpn_proxy').checked = true;
         document.getElementById('is_suspicious_proxy').checked = false;
     }
@@ -106,16 +127,20 @@ function handleTransactionScore(e) {
     btn.innerText = 'Scoring…';
     btn.disabled = true;
 
+    const trustClientVelocity = document.getElementById('velocity_enabled').checked;
     const payload = {
         user_id: document.getElementById('user_id').value,
         device_id: document.getElementById('device_id').value,
         ip_address: document.getElementById('ip_address').value,
         amount: parseFloat(document.getElementById('amount').value),
-        velocity_1h: parseInt(document.getElementById('velocity_1h').value),
+        velocity_enabled: trustClientVelocity,
         merchant_id: document.getElementById('merchant_id').value,
         is_vpn_proxy: document.getElementById('is_vpn_proxy').checked,
         is_suspicious_proxy: document.getElementById('is_suspicious_proxy').checked
     };
+    if (trustClientVelocity) {
+        payload.velocity_1h = parseInt(document.getElementById('velocity_1h').value, 10);
+    }
 
     fetch(`${API_BASE}/api/v1/transactions/score`, {
         method: 'POST',
@@ -130,6 +155,8 @@ function handleTransactionScore(e) {
         btn.disabled = false;
         updateRiskDisplay(data.risk_evaluation);
         loadStats();
+        loadRecentTransactions();
+        loadHITLQueue();
 
         if (data.needs_investigation) {
             document.getElementById('agent-report-container').innerHTML = `
@@ -170,7 +197,8 @@ function updateRiskDisplay(evalRes) {
     badge.innerText = `${evalRes.risk_tier} RISK`;
     badge.className = `risk-badge tier-${(evalRes.risk_tier || 'low').toLowerCase()}`;
 
-    document.getElementById('decision-text').innerText = `Decision: ${evalRes.decision}`;
+    const velocityState = `${evalRes.velocity_source || 'BACKEND'} · ${evalRes.velocity_1h ?? 0}/h`; 
+    document.getElementById('decision-text').innerText = `Decision: ${evalRes.decision} · Velocity ${velocityState}${evalRes.review_id ? ' · HITL queued' : ''}`;
 
     // Update Progress Bars
     document.getElementById('val-tabular').innerText = `${evalRes.tabular_score}%`;
@@ -334,21 +362,26 @@ function loadRecentTransactions() {
             const tbody = document.getElementById('txns-table-body');
             tbody.innerHTML = '';
             if (data.transactions.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8">No transactions logged yet.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="12">No transactions logged yet.</td></tr>';
                 return;
             }
             data.transactions.forEach(t => {
                 const tr = document.createElement('tr');
                 const tierClass = `tier-pill tier-${(t.risk_tier || 'unscored').toLowerCase()}`;
+                const velocityLabel = `${t.velocity_source || 'BACKEND'} · ${t.velocity_1h}/h`; 
                 tr.innerHTML = `
-                    <td><code>${t.transaction_id}</code></td>
-                    <td><code>${t.user_id}</code></td>
-                    <td>${t.device_id}</td>
-                    <td>${t.ip_address}</td>
-                    <td>₹${t.amount.toLocaleString()}</td>
-                    <td><strong>${t.risk_score}</strong></td>
-                    <td><span class="${tierClass}">${t.risk_tier}</span></td>
-                    <td><code>${t.decision}</code></td>
+                    <td><code>${escapeHtml(t.transaction_id)}</code></td>
+                    <td><code>${escapeHtml(t.user_id)}</code></td>
+                    <td>${escapeHtml(t.device_id)}</td>
+                    <td>${escapeHtml(t.ip_address)}</td>
+                    <td>₹${Number(t.amount).toLocaleString()}</td>
+                    <td><strong>${velocityLabel}</strong></td>
+                    <td>${Number(t.gnn_score).toFixed(1)}%</td>
+                    <td>${Number(t.tabular_score).toFixed(1)}%</td>
+                    <td>${Number(t.stacker_calibrated_score).toFixed(1)}%</td>
+                    <td><strong>${Number(t.risk_score).toFixed(1)}</strong></td>
+                    <td><span class="${tierClass}">${escapeHtml(t.risk_tier)}</span></td>
+                    <td><code>${escapeHtml(t.decision)}</code></td>
                 `;
                 tbody.appendChild(tr);
             });
@@ -364,4 +397,42 @@ function refreshLogStream() {
             document.getElementById('log-agent').innerText = data.agent_logs.join('\n');
         })
         .catch(err => console.error("Error streaming logs:", err));
+}
+
+
+async function loadHITLQueue() {
+    const box = document.getElementById("hitl-queue");
+    if (!box) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/v1/hitl/queue`);
+        const data = await res.json();
+        if (!data.reviews || data.reviews.length === 0) {
+            box.innerHTML = '<p class="placeholder-msg">No pending human reviews.</p>';
+            return;
+        }
+        box.innerHTML = data.reviews.map(r => `
+            <div class="card" style="margin-bottom:12px;">
+                <strong>${escapeHtml(r.transaction_id)}</strong>
+                <span>Risk ${Number(r.risk_score).toFixed(1)}</span>
+                <p><strong>Reasons:</strong> ${escapeHtml((r.reasons || []).join(", ") || "Policy escalation")}</p>
+                <p><strong>Status:</strong> ${escapeHtml(r.status)} · Queued ${escapeHtml(r.created_at || "")}</p>
+                <pre>${escapeHtml(JSON.stringify(r.evidence || {}, null, 2))}</pre>
+                <button class="btn-preset" onclick="resolveHITL('${r.review_id}','APPROVE')">Approve</button>
+                <button class="btn-preset" onclick="resolveHITL('${r.review_id}','HOLD')">Hold</button>
+                <button class="btn-preset tier-tag-critical" onclick="resolveHITL('${r.review_id}','BLOCK')">Block</button>
+            </div>`).join("");
+    } catch (e) {
+        box.innerHTML = `<p class="placeholder-msg">Could not load review queue.</p>`;
+    }
+}
+
+async function resolveHITL(reviewId, decision) {
+    const rationale = window.prompt("Human rationale (required):");
+    if (!rationale) return;
+    await fetch(`${API_BASE}/api/v1/hitl/review/${encodeURIComponent(reviewId)}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({decision, reviewer: "dashboard-reviewer", rationale})
+    });
+    await loadHITLQueue();
 }
