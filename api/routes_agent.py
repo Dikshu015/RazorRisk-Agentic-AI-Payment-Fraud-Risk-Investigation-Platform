@@ -3,7 +3,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from agent.graph_agent import investigation_agent
 from agent import llm_investigator, mode_state
-from ml.risk_aggregator import calculate_composite_risk_score
+from ml.risk_aggregator import calculate_composite_risk_score, HIGH_RISK_THRESHOLD
+from ml.decision_policy import apply_decision_policy
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger
 
@@ -66,13 +67,31 @@ def set_agent_status(req: AgentModeRequest):
     return get_agent_status()
 
 @router.post("/run/{transaction_id}")
-def run_investigation(transaction_id: str):
-    """Triggers LangGraph Investigation Agent on a specific transaction ID."""
+def run_investigation(transaction_id: str, force: bool = False):
+    """Triggers the investigation agent (deterministic and/or LLM) on a
+    specific transaction ID.
+
+    Server-side necessity guard: this used to run unconditionally for
+    ANY transaction_id passed in, trusting the dashboard frontend to only
+    call this endpoint for transactions that actually crossed the
+    HIGH_RISK_THRESHOLD / hitl_required bar (routes_transactions.py computes
+    that same condition as `needs_investigation` and only then shows the
+    dashboard's "Investigate" button). Nothing enforced that server-side —
+    a direct API call (or a bug in a future frontend change) could invoke a
+    full investigation, including a real LLM call, for every low-risk
+    transaction, which is both needless cost/latency and exactly the
+    "checking every transaction this heavily" the LLM step is meant to
+    avoid. Recomputes the same risk_score/hitl_required check here and
+    refuses (with the numbers that justify the refusal) unless the caller
+    explicitly passes ?force=true — an analyst manually pulling up a report
+    for a low-risk transaction out of curiosity is still one query param
+    away, but it's now an explicit choice rather than the unenforced
+    default."""
     conn = get_raw_sqlite_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT t.user_id, t.device_id, t.ip_address, t.merchant_id, t.amount, t.velocity_1h,
+        SELECT t.user_id, t.device_id, t.ip_address, t.merchant_id, t.amount,
                d.is_vpn_proxy, ip.is_suspicious_proxy
         FROM transactions t
         LEFT JOIN devices d ON t.device_id = d.device_id
@@ -92,12 +111,32 @@ def run_investigation(transaction_id: str):
         "ip_address": row[2],
         "merchant_id": row[3],
         "amount": row[4],
-        "velocity_1h": row[5],
-        "is_vpn_proxy": bool(row[6]),
-        "is_suspicious_proxy": bool(row[7])
+        "is_vpn_proxy": bool(row[5]),
+        "is_suspicious_proxy": bool(row[6])
     }
 
     risk_res = calculate_composite_risk_score(txn_payload)
+    policy_res = apply_decision_policy(txn_payload, risk_res)
+    needs_investigation = risk_res["risk_score"] >= HIGH_RISK_THRESHOLD or policy_res.get("hitl_required", False)
+
+    if not needs_investigation and not force:
+        conn.close()
+        logger.info(
+            f"Investigation skipped for {transaction_id}: risk_score={risk_res['risk_score']} "
+            f"< {HIGH_RISK_THRESHOLD} and no HITL trigger — not necessary. Pass ?force=true to run anyway."
+        )
+        return {
+            "transaction_id": transaction_id,
+            "investigation_skipped": True,
+            "reason": (
+                f"risk_score {risk_res['risk_score']} is below the {HIGH_RISK_THRESHOLD} investigation "
+                f"threshold and no HITL review reason was triggered — an LLM/agent investigation isn't "
+                f"warranted for this transaction. Call again with ?force=true to run one anyway."
+            ),
+            "risk_evaluation": risk_res,
+            "policy_evaluation": policy_res,
+        }
+
     investigation_res = investigation_agent.investigate(txn_payload, risk_res)
 
     # Save to database
