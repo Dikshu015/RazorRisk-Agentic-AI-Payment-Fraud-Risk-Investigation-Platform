@@ -1,0 +1,25 @@
+flowchart LR
+    T[Incoming transaction] --> F[Feature engineering]
+    F --> V[Hourly velocity]
+    F --> S[Security signals]
+    F --> TM[Tabular ML]
+    F --> G[User-only graph lookup]
+    G --> GN[GNN node embedding]
+    TM --> ST[Learned stacker]
+    GN --> ST
+    ST --> CS[Calibrated score]
+    V --> RA[Risk aggregation]
+    S --> RA
+    CS --> RA
+    RA --> P[Decision policy]
+    P --> A[APPROVE]
+    P --> H[HOLD]
+    P --> B[BLOCK]
+    P --> R[HUMAN_REVIEW]
+    R --> Q[HITL queue]
+    Q --> HR[Human reviewer]
+    HR --> D[Final reviewer decision]
+    A --> AU[Audit log]
+    H --> AU
+    B --> AU
+    D --> AU

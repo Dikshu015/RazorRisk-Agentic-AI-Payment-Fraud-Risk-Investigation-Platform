@@ -1,0 +1,51 @@
+flowchart TB
+    subgraph Input[Input Layer]
+        UI[Frontend Dashboard]
+        API[FastAPI API]
+    end
+
+    subgraph State[State and Data]
+        DB[(SQLite / transaction state)]
+        GRAPH[(User-only risk graph)]
+        AUDIT[(Audit logs)]
+    end
+
+    subgraph Intelligence[Risk Intelligence]
+        FE[Feature engineering]
+        TAB[Tabular XGBoost]
+        GNN[GraphSAGE]
+        STACK[Learned logistic stacker]
+        POLICY[Risk aggregation + policy]
+        GUARD[Security guardrails]
+        VEL[Velocity service]
+    end
+
+    subgraph Investigation[Investigation]
+        EVID[Deterministic evidence tools]
+        LLM[Optional LLM investigation]
+        HITL[Human review queue]
+    end
+
+    UI <--> API
+    API --> FE
+    API --> DB
+    DB --> VEL
+    DB --> FE
+    FE --> TAB
+    FE --> GNN
+    GRAPH --> GNN
+    FE --> VEL
+    TAB --> STACK
+    GNN --> STACK
+    STACK --> POLICY
+    VEL --> POLICY
+    GUARD --> POLICY
+    POLICY --> API
+    POLICY --> EVID
+    EVID --> LLM
+    POLICY --> HITL
+    LLM --> HITL
+    API --> AUDIT
+    HITL --> AUDIT
+    EVID --> AUDIT
+    DB --> GRAPH
