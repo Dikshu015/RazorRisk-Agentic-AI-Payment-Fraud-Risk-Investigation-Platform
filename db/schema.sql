@@ -1,4 +1,4 @@
--- RazorRisk SQLite & PostgreSQL Schema Definition
+-- RazorRisk SQLite Schema Definition
 
 CREATE TABLE IF NOT EXISTS users (
     user_id VARCHAR(50) PRIMARY KEY,
@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR(20) DEFAULT 'COMPLETED',
     velocity_1h INT DEFAULT 1,
+    velocity_enabled BOOLEAN DEFAULT FALSE,
+    velocity_source TEXT DEFAULT 'BACKEND',
     amount_zscore_prior FLOAT DEFAULT 0.0,
     is_fraud_ground_truth BOOLEAN DEFAULT FALSE
 );
@@ -53,7 +55,10 @@ CREATE TABLE IF NOT EXISTS risk_scores (
     risk_score FLOAT NOT NULL,
     tabular_score FLOAT NOT NULL,
     gnn_score FLOAT NOT NULL,
+    stacker_calibrated_score FLOAT NOT NULL DEFAULT 0.0,
     velocity_multiplier FLOAT DEFAULT 1.0,
+
+    evidence_multiplier FLOAT DEFAULT 1.0,
     risk_tier VARCHAR(20) NOT NULL,
     decision VARCHAR(30) NOT NULL,
     scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -82,3 +87,21 @@ CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_tx_device ON transactions(device_id);
 CREATE INDEX IF NOT EXISTS idx_tx_ip ON transactions(ip_address);
 CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp);
+
+
+CREATE TABLE IF NOT EXISTS human_reviews (
+    review_id VARCHAR(60) PRIMARY KEY,
+    transaction_id VARCHAR(50) REFERENCES transactions(transaction_id),
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    risk_score FLOAT NOT NULL,
+    reasons_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    reviewer VARCHAR(80),
+    reviewer_decision VARCHAR(20),
+    reviewer_rationale TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_reviews_status ON human_reviews(status);
+CREATE INDEX IF NOT EXISTS idx_human_reviews_created ON human_reviews(created_at);
