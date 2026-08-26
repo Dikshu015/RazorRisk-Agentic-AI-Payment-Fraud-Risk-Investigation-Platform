@@ -41,10 +41,14 @@ class RiskInvestigationAgent:
         logger.info(f"========== Starting investigation for Txn: {txn_id} (User: {user_id}) ==========")
 
         # Step 1: deterministic evidence gathering — identical for both modes
+        # Server-computed, from risk_summary (ml/risk_aggregator.py) — not
+        # read from txn_payload, which used to carry a client-suppliable
+        # velocity_1h that nothing here re-verified.
+        velocity_1h = int(risk_summary.get("velocity_1h", 1))
         graph_evidence = GraphTool.run(user_id)
         history_evidence = TransactionHistoryTool.run(user_id)
         device_evidence = DeviceRiskTool.run(device_id, ip_address)
-        model_evidence = FraudModelTool.run(txn_payload)
+        model_evidence = FraudModelTool.run(txn_payload, velocity_1h)
         evidence = {
             "graph_evidence": graph_evidence, "history_evidence": history_evidence,
             "device_evidence": device_evidence, "model_evidence": model_evidence,
@@ -80,7 +84,7 @@ class RiskInvestigationAgent:
 
         if hypothesis is None:
             hypothesis, rec_action, rationale = determine_fraud_hypothesis(
-                txn_payload, graph_evidence, history_evidence, device_evidence
+                txn_payload, graph_evidence, history_evidence, device_evidence, velocity_1h
             )
 
         # Step 3: build the report — same template regardless of mode
@@ -95,7 +99,7 @@ class RiskInvestigationAgent:
             f"Location: {device_evidence['city']}, {device_evidence['country']} ({device_evidence['isp']})."
         )
         behavior_summary = (
-            f"Current velocity: {txn_payload.get('velocity_1h', 1)} txns/hr "
+            f"Current velocity: {velocity_1h} txns/hr "
             f"(historical: {history_evidence['total_historical_txns']} total txns, "
             f"avg amt: ₹{history_evidence['historical_avg_amount']:,.2f})."
         )
