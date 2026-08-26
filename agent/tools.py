@@ -50,7 +50,8 @@ class GraphTool:
             "community_id": g_feat["community_id"],
             "community_size": g_feat["community_size"],
             "community_fraud_ratio": g_feat["community_fraud_ratio"],
-            "suspicious_network_cluster": g_feat["shared_device_accounts"] >= 3 or g_feat["shared_ip_accounts"] >= 4
+            "suspicious_network_cluster": False,
+            "connectivity_strength": "strong" if (g_feat["shared_device_accounts"] >= 3 or g_feat["shared_ip_accounts"] >= 5) else "weak_or_normal"
         }
         logger.info(f"[GraphTool] Result for User:{user_id} -> ClusterSuspicious:{result['suspicious_network_cluster']}")
         return result
@@ -133,18 +134,21 @@ class FraudModelTool:
     description = "Returns tabular ML model fraud probability, GNN score, and top risk factors."
 
     @staticmethod
-    def run(txn_payload: dict) -> dict:
+    def run(txn_payload: dict, velocity_1h: int) -> dict:
+        """velocity_1h is the server-computed value from risk_summary
+        (ml/risk_aggregator.py), passed in by the caller — txn_payload no
+        longer carries a client-suppliable velocity field at all."""
         from ml.risk_aggregator import live_tabular_score, live_gnn_score_and_evidence
 
         user_id = txn_payload.get("user_id", "")
-        tab_score = live_tabular_score(txn_payload)
+        tab_score, _amount_zscore = live_tabular_score(txn_payload, velocity_1h)
         gnn_score, _evidence = live_gnn_score_and_evidence(user_id)
 
         top_reasons = []
         if txn_payload.get("amount", 0) > 50000:
             top_reasons.append("High Transaction Amount (> ₹50,000)")
-        if txn_payload.get("velocity_1h", 1) >= 5:
-            top_reasons.append(f"Elevated Hourly Velocity ({txn_payload.get('velocity_1h')} txns/hr)")
+        if velocity_1h >= 5:
+            top_reasons.append(f"Elevated Hourly Velocity ({velocity_1h} txns/hr)")
         if gnn_score > 0.5:
             top_reasons.append("GNN Risk Embedding triggered by suspicious graph neighborhood")
         if txn_payload.get("is_vpn_proxy", False) or txn_payload.get("is_suspicious_proxy", False):
