@@ -138,8 +138,43 @@ class TestDocumentationAndFrontendContract(unittest.TestCase):
             self.assertIn(token.lower(), (readme + workflow).lower())
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestVelocityFieldErrorHandlingContract(unittest.TestCase):
+    """Bug #26 regression: velocity_1h is the only field on the scoring form
+    with backend-side validation (Pydantic's `ge=0`, plus risk_aggregator.py's
+    "required when velocity_enabled=true" check). handleTransactionScore()
+    used to call res.json() unconditionally with no res.ok check, so a
+    validation failure on this field handed FastAPI's raw error body
+    (a string, or a list of {loc, msg, ...} objects) straight to
+    updateRiskDisplay(data.risk_evaluation) — which is undefined on an error
+    response — crashing and leaking that raw structure into the user-facing
+    alert. These check the source for the specific fix, not just that some
+    error handling exists, since a shallower fix (e.g. only checking res.ok
+    without extracting a clean message) would still leak the raw body."""
+
+    def setUp(self):
+        self.js = Path("static/js/app.js").read_text(encoding="utf-8")
+
+    def test_score_response_checks_ok_before_using_the_body(self):
+        self.assertIn("{ ok: res.ok, status: res.status, data }", self.js)
+        self.assertIn("if (!ok) {", self.js)
+
+    def test_error_message_extractor_handles_both_fastapi_error_shapes(self):
+        self.assertIn("function extractErrorMessage(data, status)", self.js)
+        # Plain-string `detail` (risk_aggregator.py's manually-raised ValueError).
+        self.assertIn("typeof detail === 'string'", self.js)
+        # List-of-objects `detail` (Pydantic's own validation-error shape).
+        self.assertIn("Array.isArray(detail)", self.js)
+
+    def test_invalid_client_velocity_is_rejected_before_the_network_call(self):
+        self.assertIn("Number.isNaN(parsedVelocity)", self.js)
+        self.assertIn("parsedVelocity < 0", self.js)
+
+    def test_preset_switch_resets_stale_velocity_value(self):
+        self.assertIn("document.getElementById('velocity_1h').value = '1';", self.js)
+
+    def test_recent_transactions_table_has_a_velocity_fallback(self):
+        self.assertIn("t.velocity_1h ?? 0", self.js)
+
 
 class TestGraphFreshnessContract(unittest.TestCase):
     def test_transaction_path_invalidates_live_graph_after_commit(self):
@@ -147,5 +182,67 @@ class TestGraphFreshnessContract(unittest.TestCase):
         self.assertIn("invalidate_live_graph_snapshot()", source)
         self.assertIn("conn.commit()", source)
         self.assertLess(source.index("conn.commit()"), source.index("invalidate_live_graph_snapshot()"))
+
+
+class TestRealDataIngestionIsAdditive(unittest.TestCase):
+    """Bug #22 regression: ingest_real_kaggle_dataset.py used to open with
+    DELETE FROM transactions/users/devices/... before loading the real CSV,
+    silently wiping every synthetic golden-matrix scenario. This proves the
+    current version never deletes anything and layers real rows onto the
+    existing fraud-ring/baseline identities instead."""
+
+    def test_ingestion_never_deletes_and_preserves_golden_matrix_users(self):
+        import numpy as np
+        import pandas as pd
+        from data.ingest_real_kaggle_dataset import ingest_real_dataset, CSV_PATH
+
+        conn = get_raw_sqlite_connection()
+        before_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        before_hostel = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE user_id = 'USER_HOSTEL_1'"
+        ).fetchone()[0]
+        before_ring1 = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE user_id = 'USER_RING1_1'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertGreater(before_hostel, 0, "golden-matrix fixture missing — run generate_synthetic_data first")
+
+        np.random.seed(7)
+        n_normal, n_fraud = 200, 10
+        df = pd.DataFrame({
+            "Time": np.sort(np.random.uniform(0, 86400, n_normal + n_fraud)),
+            "Amount": np.concatenate([np.random.exponential(50, n_normal), np.random.exponential(300, n_fraud)]),
+            "Class": np.concatenate([np.zeros(n_normal, dtype=int), np.ones(n_fraud, dtype=int)]),
+        })
+        wrote_temp_csv = not CSV_PATH.exists()
+        if wrote_temp_csv:
+            df.to_csv(CSV_PATH, index=False)
+        try:
+            ingest_real_dataset(sample_size=len(df))
+        finally:
+            if wrote_temp_csv:
+                CSV_PATH.unlink(missing_ok=True)
+
+        conn = get_raw_sqlite_connection()
+        after_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        after_hostel = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE user_id = 'USER_HOSTEL_1'"
+        ).fetchone()[0]
+        after_ring1 = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE user_id = 'USER_RING1_1'"
+        ).fetchone()[0]
+        real_rows_added = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE transaction_id LIKE 'TXN_REAL_%'"
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertGreaterEqual(after_users, before_users, "ingestion must never reduce the user count")
+        self.assertEqual(after_hostel, before_hostel, "golden-matrix hostel scenario must survive ingestion untouched")
+        self.assertGreaterEqual(after_ring1, before_ring1, "Ring1 fraud identity must survive, and may gain real-fraud rows")
+        self.assertGreater(real_rows_added, 0, "ingestion should have added real transactions on top")
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
