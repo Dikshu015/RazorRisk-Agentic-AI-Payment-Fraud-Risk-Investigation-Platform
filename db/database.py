@@ -5,19 +5,11 @@ from utils.logger import get_logger
 
 logger = get_logger("database")
 
-# Earlier versions of this file wired up a parallel SQLAlchemy engine + ORM
-# models (db/models.py) intended to support Postgres via DATABASE_URL. It
-# was never actually load-bearing: init_db() was the only thing that ever
-# touched it, and every real query in the app (all of api/, ml/, data/,
-# agent/) goes through get_raw_sqlite_connection() below, using raw sqlite3
-# syntax that doesn't even work against Postgres. A platform that
-# auto-detects infrastructure from dependencies (e.g. antideploy.com seeing
-# asyncpg/psycopg2-binary in requirements.txt) would provision a Postgres
-# database that the app would then silently never write a single row to.
-# Removed rather than left half-wired — see PROJECT_WORKFLOW.md for the
-# full account of this if you want to actually add Postgres support properly
-# (it needs schema.sql's SQLite-specific syntax ported, and every "?"
-# placeholder in every raw query rewritten to "%s").
+# Historical note: an earlier version carried an unused SQLAlchemy/Postgres ORM
+# path alongside the real sqlite3 implementation. It was removed because every
+# application query already used raw sqlite3 and the two paths were not actually
+# interoperable. RazorRisk intentionally has one application-owned SQLite data
+# layer today. See PROJECT_WORKFLOW.md for the migration history.
 
 def init_db():
     """Initialize database tables using schema.sql (SQLite only — see note above)."""
@@ -27,6 +19,20 @@ def init_db():
     conn = sqlite3.connect(db_file)
     with open(schema_path, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
+
+    # Lightweight SQLite migrations for databases created by older RazorRisk
+    # versions. schema.sql handles fresh installs; these ALTERs keep an
+    # existing demo DB usable after upgrading the application.
+    def add_column_if_missing(table, column, definition):
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            logger.info(f"Database migration: added {table}.{column}")
+
+    add_column_if_missing("transactions", "velocity_enabled", "BOOLEAN DEFAULT 0")
+    add_column_if_missing("transactions", "velocity_source", "TEXT DEFAULT 'BACKEND'")
+    add_column_if_missing("risk_scores", "stacker_calibrated_score", "FLOAT NOT NULL DEFAULT 0.0")
+
     conn.commit()
     conn.close()
     logger.info(f"SQLite database schema applied successfully at {db_file}")
