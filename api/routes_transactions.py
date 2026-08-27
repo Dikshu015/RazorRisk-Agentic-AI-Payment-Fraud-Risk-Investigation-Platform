@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from ml.risk_aggregator import calculate_composite_risk_score, HIGH_RISK_THRESHOLD, invalidate_live_graph_snapshot
 from ml.decision_policy import apply_decision_policy
+from ml.watchlist import refresh_watchlist
 from api.routes_hitl import enqueue_review
 from ml.graph_builder import graph_builder
 from db.database import get_raw_sqlite_connection
@@ -115,6 +116,12 @@ def score_transaction(payload: TransactionPayload):
         # transaction_id FK resolvable on SQLite configurations that enforce FK checks.
         review_id = enqueue_review(txn_id, risk_res)
         risk_res["review_id"] = review_id
+
+        # MONITOR soft-flags the user for the next transaction (see
+        # ml/watchlist.py) — same FK-safety reasoning as enqueue_review
+        # above, run after the transaction row exists.
+        if risk_res.get("decision") == "MONITOR":
+            refresh_watchlist(payload.user_id, txn_id)
 
         # 4. Fold this transaction into the live in-memory graph immediately
         # (O(1) incremental update) so the Graph Topology tab reflects it
