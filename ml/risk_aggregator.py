@@ -68,8 +68,9 @@ from ml.common import classification_report_dict
 from ml.train_tabular_model import train_tabular_model, predict_tabular_fraud_prob, MERCHANT_RATES_PATH
 from ml.train_gnn import train_gnn, GraphSAGEInference, GNN_WEIGHTS_PATH
 from ml.risk_graph import build_user_graph, detect_communities, fetch_node_features, build_adjacency
-from config import PRIOR_AMOUNT_WINDOW_DAYS
+from config import PRIOR_AMOUNT_WINDOW_DAYS, WATCHLIST_SCORE_MULTIPLIER
 from db.database import get_raw_sqlite_connection
+from ml.watchlist import is_watchlisted
 from utils.logger import get_logger
 
 logger = get_logger("risk_aggregator")
@@ -474,7 +475,14 @@ def calculate_composite_risk_score(txn_payload: dict) -> dict:
     if txn_payload.get("is_vpn_proxy", False) or txn_payload.get("is_suspicious_proxy", False):
         velocity_mult *= 1.15
 
-    raw_score = calibrated_prob * velocity_mult * 100.0
+    # Repeat-MEDIUM-risk overlay (see ml/watchlist.py). Explicit and
+    # separately labeled, same as velocity_mult above — not folded into the
+    # learned stacker, since "this user tripped MONITOR recently" isn't a
+    # feature either model was trained on.
+    watchlist_flagged = is_watchlisted(user_id)
+    watchlist_mult = WATCHLIST_SCORE_MULTIPLIER if watchlist_flagged else 1.0
+
+    raw_score = calibrated_prob * velocity_mult * watchlist_mult * 100.0
     final_risk_score = round(float(min(max(raw_score, 0.0), 100.0)), 1)
 
     if final_risk_score >= CRITICAL_THRESHOLD:
@@ -494,6 +502,8 @@ def calculate_composite_risk_score(txn_payload: dict) -> dict:
         "velocity_multiplier": round(velocity_mult, 2),
         "velocity_enabled": trust_client_velocity,
         "velocity_source": velocity_source,
+        "watchlist_flagged": watchlist_flagged,
+        "watchlist_multiplier": round(watchlist_mult, 2),
         "effective_velocity_1h": effective_velocity_1h,
         # The selected velocity is exposed with its source so the dashboard
         # and audit trail can distinguish CLIENT simulation mode from BACKEND
@@ -512,10 +522,11 @@ def calculate_composite_risk_score(txn_payload: dict) -> dict:
     logger.info(
         "Transaction User:%s Amt:₹%s -> GNNNodeEmbedding:%s%% TabularML:%s%% "
         "StackerCalibrated:%s%% Velocity1h:%s VelocitySource:%s VelocityMultiplier:%s "
+        "Watchlisted:%s WatchlistMultiplier:%s "
         "RiskScore:%s/100 [%s] Action:%s",
         user_id, amount, result["gnn_score"], result["tabular_score"],
         result["stacker_calibrated_score"], velocity_1h, velocity_source,
-        result["velocity_multiplier"],
+        result["velocity_multiplier"], watchlist_flagged, result["watchlist_multiplier"],
         final_risk_score, tier, decision,
     )
     return result
