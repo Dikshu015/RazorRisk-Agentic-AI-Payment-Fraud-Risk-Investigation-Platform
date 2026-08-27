@@ -8,6 +8,47 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 
 ---
 
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Live Demo / Screenshots](#live-demo-screenshots)
+- [Why RazorRisk?](#why-razorrisk)
+- [What the project demonstrates](#what-the-project-demonstrates)
+  - [1. Transaction-level fraud detection](#1-transaction-level-fraud-detection)
+  - [2. Graph-based fraud-community detection](#2-graph-based-fraud-community-detection)
+  - [3. Learned score fusion](#3-learned-score-fusion)
+  - [4. Stateful hourly velocity](#4-stateful-hourly-velocity)
+  - [5. Security guardrails](#5-security-guardrails)
+  - [6. Real human-in-the-loop workflow](#6-real-human-in-the-loop-workflow)
+  - [7. Evidence-grounded investigation](#7-evidence-grounded-investigation)
+  - [8. Auditable model decomposition](#8-auditable-model-decomposition)
+- [End-to-end workflow](#end-to-end-workflow)
+  - [Transaction flow](#transaction-flow-data-moving-through-the-system)
+  - [System structure](#system-structure-how-components-connect-and-complement-each-other)
+  - [Causal graph update](#causal-graph-update)
+- [Why the architecture is stronger than a single fraud model](#why-the-architecture-is-stronger-than-a-single-fraud-model)
+- [Evaluation](#evaluation)
+  - [Track A — Synthetic system benchmark](#track-a-synthetic-system-benchmark)
+- [External benchmark — ULB / Kaggle Credit Card Fraud Detection](#external-benchmark-ulb-kaggle-credit-card-fraud-detection)
+- [How to interpret the external result](#how-to-interpret-the-external-result)
+- [What the evaluation proves — and what it does not](#what-the-evaluation-proves-and-what-it-does-not)
+- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed)
+  - [Bugs 1–6](#bug-1-fraud-ring-graph-explosion) · [Bugs 7–13](#bugs-713-earlier-architecture-and-deployment-fixes) · [Bugs 18–27](#bugs-1827-found-after-the-architecture-looked-done)
+- [Testing](#testing)
+- [Tech Stack](#tech-stack)
+- [Deployment](#deployment)
+- [Quick Start](#quick-start)
+- [Suggested Demo Flow](#suggested-demo-flow)
+- [Repository Structure](#repository-structure)
+- [API Reference](#api-reference)
+- [How RazorRisk Mitigates Those Limitations](#how-razorrisk-mitigates-those-limitations)
+- [Limitations and Defensible Scope](#limitations-and-defensible-scope)
+- [FAQ](#faq)
+- [References / Further Reading](#references-further-reading)
+- [Status](#status)
+
+---
+
 ## Highlights
 
 - **Learned score fusion with graph evidence as a real input** — a logistic-regression stacker combines the tabular score, the GNN score, *and* normalized shared-device/shared-IP counts, instead of a fixed `0.35/0.45/0.20` formula or a hand-picked connectivity rule bolted on afterward (see Bug 18 below for why the rule version was retired).
@@ -19,7 +60,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - **Evidence-grounded investigation** — four deterministic tools (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`) compute the underlying evidence; an LLM, when available, interprets it rather than inventing it.
 - **Two honest, separately-scoped evaluations** — a controlled synthetic benchmark for graph/fraud-ring behavior, and a real external ROC-AUC/PR-AUC/precision/recall/F1 run on the ULB/Kaggle Credit Card Fraud dataset for the tabular component, never conflated with each other.
 - **A golden adversarial test matrix** — `tests/GOLDEN_TEST_MATRIX.md` checks the trained model against dozens of named fraud-ring and benign-look-alike scenarios (hostel Wi-Fi, carrier-NAT, festival sales, family devices) and discloses, by name, the cases that are still gaps rather than claiming full coverage.
-- **A published bug history, not just a feature list** — 25 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
+- **A published bug history, not just a feature list** — 27 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
 - **One honest data layer** — a single raw-`sqlite3` path; a decorative, never-queried SQLAlchemy/Postgres path from an earlier iteration was removed entirely rather than left half-wired (Bug 12).
 
 ---
@@ -133,15 +174,19 @@ This distinction matters because a client-controlled velocity field is not a sec
 Model output is not the only source of risk. Explicit policy rules can escalate high-impact transactions, suspicious infrastructure, or model disagreements.
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 35, 'rankSpacing': 55}}}%%
 flowchart TD
     M[Model evidence] --> P[Decision policy]
     S[Security signals] --> P
     I[Transaction impact] --> P
-    P --> A[APPROVE]
-    P --> H[HOLD]
-    P --> B[BLOCK]
-    P --> R[HUMAN_REVIEW]
+    P --> M2{Mandatory-human reason?<br/>uncertainty / disagreement /<br/>evidence conflict / high-impact}
+    M2 -->|Yes, always| R[HUMAN_REVIEW]
+    M2 -->|No| C{Stacker confidence<br/>&ge; 0.95?}
+    C -->|Yes| B[BLOCK — auto,<br/>no human in loop]
+    C -->|No| A[APPROVE / MONITOR / HOLD<br/>by risk tier]
 ```
+
+A confidence threshold alone never overrides the mandatory-human reasons — model disagreement, evidence conflict, and high-dollar-amount transactions always keep a human in the loop regardless of how confident the score is (see [`ml/decision_policy.py`](ml/decision_policy.py)).
 
 ### 6. Real human-in-the-loop workflow
 
@@ -190,7 +235,8 @@ This makes it possible to answer **why** a transaction received its final action
 ## End-to-end workflow
 
 ```mermaid
-flowchart LR
+%%{init: {'flowchart': {'nodeSpacing': 30, 'rankSpacing': 50}}}%%
+flowchart TB
     T1[Receive transaction] --> F[Build transaction features]
     F --> V[Calculate or select hourly velocity]
     V --> G[Query User-only risk graph]
@@ -200,15 +246,17 @@ flowchart LR
     ST --> O[Apply velocity / proxy / security overlays]
     O --> R[Final 0-100 risk score]
     R --> P[Decision policy]
-    P --> D[APPROVE / HOLD / BLOCK / HUMAN_REVIEW]
-    D --> A[Persist audit evidence]
-    D --> H{HITL required?}
-    H -->|Yes| Q[Create HITL review]
-    H -->|No| E[Complete automated path]
+    P --> M{Mandatory-human reason?<br/>uncertainty / disagreement /<br/>evidence conflict / high-impact}
+    M -->|Yes, always| H[HUMAN_REVIEW]
+    M -->|No| C{Stacker confidence &ge; 0.95?}
+    C -->|Yes| AB[Auto-block<br/>no human in loop]
+    C -->|No| TIER[Tier-based automatic action<br/>APPROVE / MONITOR / HOLD / BLOCK_PENDING_REVIEW]
+    H --> Q[Create HITL review]
     Q --> I[Optional investigation agent]
-    I --> HR[Human/system action]
-    HR --> A
-    A --> Z[Audit trail]
+    I --> HR[Human reviewer action]
+    AB --> Z[Audit trail]
+    TIER --> Z
+    HR --> Z
 ```
 
 ### Transaction flow — data moving through the system
@@ -216,7 +264,8 @@ flowchart LR
 The transaction path is intentionally shown as parallel signal branches that converge before policy evaluation. Each branch produces evidence; no single branch directly owns the final decision.
 
 ```mermaid
-flowchart LR
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 50}}}%%
+flowchart TB
     T[Incoming transaction] --> F[Feature engineering]
     F --> V[Hourly velocity]
     F --> S[Security signals]
@@ -230,15 +279,22 @@ flowchart LR
     S --> RA
     CS --> RA
     RA --> P[Decision policy]
-    P --> A[APPROVE]
-    P --> H[HOLD]
-    P --> B[BLOCK]
-    P --> R[HUMAN_REVIEW]
+    P --> M{Mandatory-human reason present?}
+    M -->|Yes, always| R[HUMAN_REVIEW]
+    M -->|No| C{Confidence &ge; 0.95?}
+    C -->|Yes| B[BLOCK — auto]
+    C -->|No| TIER{Risk tier}
+    TIER -->|LOW| A[APPROVE]
+    TIER -->|MEDIUM| MON[MONITOR]
+    TIER -->|HIGH| HOLD[HOLD_FOR_INVESTIGATION]
+    TIER -->|CRITICAL| BPR[BLOCK_PENDING_REVIEW]
     R --> Q[HITL queue]
     Q --> HR[Human reviewer]
     HR --> D[Final reviewer decision]
     A --> AU[Audit trail]
-    H --> AU
+    MON --> AU
+    HOLD --> AU
+    BPR --> AU
     B --> AU
     D --> AU
 ```
@@ -248,6 +304,7 @@ flowchart LR
 This is the structural view: the frontend/API are the entry points, transaction state feeds stateful features, the graph supplies relational context, the ML models generate complementary evidence, policy combines those signals, and investigation/HITL handle cases that should not be decided by a model alone.
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 32, 'rankSpacing': 55}}}%%
 flowchart TB
     subgraph Input[Input Layer]
         UI[Frontend Dashboard]
@@ -267,7 +324,7 @@ flowchart TB
         STACK[Learned stacker]
         VEL[Velocity service]
         GUARD[Security guardrails]
-        POLICY[Risk aggregation + policy]
+        POLICY[Risk aggregation + policy<br/>incl. confidence auto-block]
     end
 
     subgraph Investigation[Investigation and Resolution]
@@ -292,7 +349,7 @@ flowchart TB
     GUARD --> POLICY
     POLICY --> API
     POLICY --> EVID
-    POLICY --> HITL
+    POLICY -->|"only if mandatory-human<br/>reason, or confidence < 0.95"| HITL
     EVID --> LLM
     LLM --> HITL
     API --> AUDIT
@@ -565,7 +622,7 @@ Direct tests could hit SQLite tables before the application startup path initial
 
 **Resolution:** initialize the test database schema explicitly in `tests/conftest.py`.
 
-Current regression suite (after Bugs 18–26 below added their own coverage):
+Current regression suite (after Bugs 18–27 below added their own coverage):
 
 **69 tests passed.**
 
@@ -573,9 +630,9 @@ Current regression suite (after Bugs 18–26 below added their own coverage):
 
 Before the six bugs above, an earlier phase of the project fixed seven more foundational issues: a graph-traversal bug that turned a 7-person fraud ring into a 692-node subgraph, a Groq provider that appeared configured but silently fell back, a new-user GNN path that used a cached lookup instead of a real inductive forward pass, hand-picked `0.35/0.45/0.20` fusion weights, a train/test split that could leak the same user across both sets, an untraceable transaction across log channels, and a decorative SQLAlchemy/Postgres path that a deployment auto-detector mistook for a real dependency. Full descriptions, plus three more deployment-specific fixes (#11–13): **[PROJECT_WORKFLOW.md § 4](PROJECT_WORKFLOW.md#4-deployment--ops)**.
 
-### Bugs 18–25 — Found after the architecture looked "done"
+### Bugs 18–27 — Found after the architecture looked "done"
 
-Six more bugs surfaced from actually running scenarios end-to-end rather than trusting the design, spanning three phases: closing a false-positive gap in scoring, discovering the *same* gap re-appearing in a different file, and later disclosing that a scenario and a test file were themselves subtly wrong.
+More bugs surfaced from actually running scenarios end-to-end rather than trusting the design, spanning several phases: closing a false-positive gap in scoring, discovering the *same* gap re-appearing in a different file, disclosing that a scenario and a test file were themselves subtly wrong, and — most recently — noticing that the HITL policy sent every ambiguous-tier transaction to a human regardless of how confident the model actually was.
 
 | # | Bug | One line |
 |---|---|---|
@@ -588,8 +645,9 @@ Six more bugs surfaced from actually running scenarios end-to-end rather than tr
 | 24 | A "legitimate but unusual" scenario was statistically identical to fraud | Empirically scored HIGH — a real, disclosed limitation of amount-deviation-only reasoning, not a hidden bug |
 | 25 | A test class after `if __name__ == "__main__"` never ran directly | `unittest discover` caught all tests; running the file directly silently dropped the last class with no error |
 | 26 | A backend validation error leaked its raw error body into the UI | `velocity_1h`'s validation failure (the only field with backend constraints) crashed `updateRiskDisplay` and dumped FastAPI's raw error shape into a user-facing `alert()` |
+| 27 | Every ambiguous-tier transaction was routed to a human, even maximally-confident fraud | `hitl_required` fired on any policy reason once the tier hit MEDIUM+, so a 0.97-confidence score with only a velocity flag queued for a human exactly like a genuinely uncertain 0.36 score did — see the [confidence auto-block diagram](#5-security-guardrails) above |
 
-Full write-ups, each with what broke it, how it was verified, and why the fix is the right one — not just what the fix was — are in **[PROJECT_WORKFLOW.md § 4.5, Bugs #18–26](PROJECT_WORKFLOW.md#45-bugs--regression-history)**.
+Full write-ups, each with what broke it, how it was verified, and why the fix is the right one — not just what the fix was — are in **[PROJECT_WORKFLOW.md § 4.5, Bugs #18–27](PROJECT_WORKFLOW.md#45-bugs--regression-history)**.
 
 ---
 
@@ -620,7 +678,7 @@ pytest -q
 
 Expected current result:
 
-**69 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–26 did).
+**69 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–27 did).
 
 ---
 
@@ -710,15 +768,14 @@ Set only the provider/API keys required for the investigation mode you want to u
 ### 5. Generate synthetic data
 
 ```bash
-python -m data.generate_synthetic_data
+python data/generate_synthetic_data.py
 ```
 
 ### 6. Train models
 
 ```bash
-python -m ml.train_tabular_model
-python -m ml.train_gnn
-python -m ml.risk_aggregator
+python ml/train_tabular_model.py
+python ml/train_gnn.py
 ```
 
 ### 7. Start the API

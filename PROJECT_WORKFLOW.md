@@ -10,7 +10,8 @@ LLM is configured.
 ## Workflow Diagram
 
 ```mermaid
-flowchart LR
+%%{init: {'flowchart': {'nodeSpacing': 30, 'rankSpacing': 50}}}%%
+flowchart TB
     T[Incoming transaction] --> F[Feature engineering]
     F --> V[Velocity]
     F --> TM[Tabular ML]
@@ -20,13 +21,18 @@ flowchart LR
     GN --> ST
     ST --> P[Risk aggregation + policy]
     V --> P
-    P --> D{Decision}
-    D --> A[Approve / Hold / Block]
-    D --> H[HITL]
+    P --> M{Mandatory-human reason?<br/>uncertainty / disagreement /<br/>evidence conflict / high-impact}
+    M -->|Yes, always| H[HITL]
+    M -->|No| C{Confidence >= 0.95?}
+    C -->|Yes| AB[Auto-block, no human]
+    C -->|No| A[Approve / Monitor / Hold<br/>by risk tier]
     H --> I[Investigation + reviewer]
     A --> AU[Audit]
+    AB --> AU
     I --> AU
 ```
+
+A confidence threshold on its own never bypasses the mandatory-human reasons — model disagreement, evidence conflict, model uncertainty, and high-dollar-amount (`HIGH_IMPACT`) transactions always route to `H[HITL]` regardless of how confident the stacker is. Only an unambiguous, high-confidence score with none of those reasons present takes the `AB[Auto-block]` path. See Bug #27 below and [`ml/decision_policy.py`](ml/decision_policy.py).
 
 ## 1. Mental Model & Core Architecture Shift
 
@@ -61,7 +67,8 @@ ML Model -> Fraud Probability.
 **RazorRisk** combines that with a graph-aware model and lets a *learned* stacker decide how much to trust each:
 
 ```mermaid
-flowchart TD
+%%{init: {'flowchart': {'nodeSpacing': 32, 'rankSpacing': 55}}}%%
+flowchart TB
     TXN["Incoming Payment"] --> GW["FastAPI /transactions/score"]
     GW --> VEL["Server-side 1h velocity count"]
     VEL --> TAB["Tabular ML / XGBoost"]
@@ -72,13 +79,16 @@ flowchart TD
     CAL --> MULT["Velocity / proxy overlay<br/>(client-trust ON / backend-calc OFF)"]
     MULT --> SCORE["Composite risk 0-100"]
     SCORE --> POLICY["Decision Policy + guardrails"]
-    POLICY -->|automatic| DECIDE["APPROVE / MONITOR / HOLD / BLOCK"]
-    POLICY -->|HITL required| QUEUE["human_reviews: PENDING"]
+    POLICY --> MANDH{"Mandatory-human reason?<br/>uncertainty / disagreement /<br/>evidence conflict / high-impact"}
+    MANDH -->|"Yes, always"| QUEUE["human_reviews: PENDING"]
+    MANDH -->|"No"| CONF{"Calibrated confidence &ge; 0.95?"}
+    CONF -->|"Yes"| AUTOBLOCK["Auto-block<br/>no human in loop"]
+    CONF -->|"No"| DECIDE["APPROVE / MONITOR / HOLD /<br/>BLOCK_PENDING_REVIEW by tier"]
     QUEUE --> REVIEW["Human reviewer"]
     SCORE --> PERSIST["transactions + risk_scores"]
     PERSIST --> QUEUE
     SCORE --> INV{"High risk or HITL?"}
-    INV -->|yes, separate call| AGENT["Investigation Agent"]
+    INV -->|"yes, separate call"| AGENT["Investigation Agent"]
     AGENT --> REPORT["Investigation report"]
 ```
 
@@ -117,7 +127,6 @@ flowchart TD
    - agent/deterministic_agent.py  honestly-labeled rule-based fallback
    - agent/prompts.py
    - agent/graph_agent.py        dispatcher between the two
-   - agent/mode_state.py
 
 8. FastAPI REST API Gateway & Logging API
    - api/main.py
@@ -126,7 +135,6 @@ flowchart TD
    - api/routes_agent.py
    - api/routes_logs.py          includes POST /logs/client for frontend error capture
    - api/routes_admin.py         reseed/ingest + full retrain, one call
-   - api/routes_hitl.py
 
 9. Frontend Dashboard & Vis.js Visualizer
    - static/index.html
@@ -135,7 +143,7 @@ flowchart TD
    - static/js/graph_vis.js
 
 10. Tests
-    - tests/*  full pipeline integration test, runs offline
+    - tests/test_risk_engine.py  full pipeline integration test, runs offline
 ```
 
 ---
@@ -165,7 +173,14 @@ sequenceDiagram
     AGG->>AGG: learned stacker -> calibrated score
     AGG->>AGG: optional velocity/proxy overlay
     AGG->>POL: composite risk + evidence
-    POL-->>API: decision + HITL policy result
+    POL->>POL: check mandatory-human reasons<br/>(uncertainty / disagreement / conflict / high-impact)
+    alt mandatory-human reason present
+        POL-->>API: HUMAN_REVIEW, hitl_required=true
+    else confidence >= 0.95 and no mandatory reason
+        POL-->>API: BLOCK (auto), hitl_required=false
+    else
+        POL-->>API: tier-based decision, hitl_required=false
+    end
     API->>DB: persist transaction + all 3 model scores
     alt HITL required
         API->>HITL: enqueue PENDING review after DB commit
@@ -262,6 +277,22 @@ sequenceDiagram
 
 ## 4. Deployment & Ops
 
+### Bugs #1–9 — foundational fixes, from the project's earliest working version
+
+Referenced by number throughout this document (Bug #13 below refers back to Bug #10, for instance) but not
+individually written up elsewhere, so listed here in full rather than left as dangling references:
+
+| # | Problem | Fix |
+|---|---|---|
+| 1 | A 2-hop traversal through a high-degree shared Merchant node turned a 7-person fraud ring into a 692-node subgraph | Split the canonical User-only risk graph (GNN training, community detection) from the richer User/Device/IP/Merchant graph (dashboard visualization only) |
+| 2 | Groq appeared configured (`GROQ_API_KEY` set) but investigations silently fell back to deterministic mode | Added the provider-specific LangChain package (`langchain-groq`) and corrected the model name; agent-status endpoint now exposes which provider is actually reachable |
+| 3 | New-user GNN inference used a cached training-time lookup instead of computing anything for the new node | `GraphSAGEInference.score_all()` performs a real inductive forward pass over the current graph, so a user who wasn't in the training set still gets a genuine score |
+| 4 | Tabular and GNN scores were combined with a hand-picked `0.35 / 0.45 / 0.20` formula | Replaced with a logistic-regression stacker trained on held-out model outputs (later extended to take graph evidence as a real input too — see Bug #18) |
+| 5 | A naive random train/test split could put the same user's transactions on both sides, leaking information | Both the tabular model and the GNN share one user-level split |
+| 6 | The public ULB/Kaggle fraud dataset has no identity/device/IP fields at all | Real transaction amounts and fraud labels are kept from Kaggle; graph relationships for the GNN benchmark come from the synthetic generator instead — the two are never presented as the same claim (see `README.md`'s Evaluation section) |
+| 7 | A single transaction was hard to trace across the 8 separate log channels | Added a correlation ID threaded through every channel a given transaction/investigation touches |
+| 8 | The dashboard's risk display waited on the (slower) investigation call before showing anything | `/api/v1/transactions/score` returns the risk evaluation immediately; investigation is a separate, later request |
+| 9 | Investigation reports rendered literal `###` / `**` characters instead of formatted Markdown in the dashboard | Added client-side Markdown parsing (`marked.js`) for the report view |
 
 **Two platforms, deliberately split — not a preference, a size constraint.** The backend's dependency stack —
 XGBoost, SciPy, scikit-learn, pandas, plus the LangChain provider packages — installs to roughly 2GB. Vercel's
@@ -291,23 +322,6 @@ regardless of configuration. The working split:
 - `static/index.html`'s asset paths changed from absolute `/dashboard/...` to relative, so the identical HTML
   file works whether it's mounted under FastAPI's `StaticFiles` (Render, local) or served standalone at the
   domain root (Vercel).
-  
-### Bugs #1–9 — foundational fixes, from the project's earliest working version
-
-Referenced by number throughout this document (Bug #13 below refers back to Bug #10, for instance) but not
-individually written up elsewhere, so listed here in full rather than left as dangling references:
-
-| # | Problem | Fix |
-|---|---|---|
-| 1 | A 2-hop traversal through a high-degree shared Merchant node turned a 7-person fraud ring into a 692-node subgraph | Split the canonical User-only risk graph (GNN training, community detection) from the richer User/Device/IP/Merchant graph (dashboard visualization only) |
-| 2 | Groq appeared configured (`GROQ_API_KEY` set) but investigations silently fell back to deterministic mode | Added the provider-specific LangChain package (`langchain-groq`) and corrected the model name; agent-status endpoint now exposes which provider is actually reachable |
-| 3 | New-user GNN inference used a cached training-time lookup instead of computing anything for the new node | `GraphSAGEInference.score_all()` performs a real inductive forward pass over the current graph, so a user who wasn't in the training set still gets a genuine score |
-| 4 | Tabular and GNN scores were combined with a hand-picked `0.35 / 0.45 / 0.20` formula | Replaced with a logistic-regression stacker trained on held-out model outputs (later extended to take graph evidence as a real input too — see Bug #18) |
-| 5 | A naive random train/test split could put the same user's transactions on both sides, leaking information | Both the tabular model and the GNN share one user-level split |
-| 6 | The public ULB/Kaggle fraud dataset has no identity/device/IP fields at all | Real transaction amounts and fraud labels are kept from Kaggle; graph relationships for the GNN benchmark come from the synthetic generator instead — the two are never presented as the same claim (see `README.md`'s Evaluation section) |
-| 7 | A single transaction was hard to trace across the 8 separate log channels | Added a correlation ID threaded through every channel a given transaction/investigation touches |
-| 8 | The dashboard's risk display waited on the (slower) investigation call before showing anything | `/api/v1/transactions/score` returns the risk evaluation immediately; investigation is a separate, later request |
-| 9 | Investigation reports rendered literal `###` / `**` characters instead of formatted Markdown in the dashboard | Added client-side Markdown parsing (`marked.js`) for the report view |
 
 **What Antideploy specifically surfaced, after Render/Vercel/HF Spaces were already handled:**
 - **Bug #11 — bare domain root 404'd.** Antideploy (and any host that serves the app at its actual domain root
@@ -373,6 +387,9 @@ The `family_unusual_spending_benign` scenario (a family member's genuinely large
 
 ### Bug #26 — A backend validation error on `velocity_1h` leaked its raw error body into the UI
 `velocity_1h` is the *only* field on the scoring form with backend-side validation — Pydantic's `Field(..., ge=0)` on the model, plus an explicit `ValueError("velocity_1h is required when velocity_enabled=true")` in `risk_aggregator.py` for the conditional-required case. `handleTransactionScore()` in `static/js/app.js` called `res.json()` unconditionally with no `res.ok` check, so on a 400/422 response the *error* body — either a plain string or FastAPI/Pydantic's `[{type, loc, msg, input, ctx, url}, ...]` shape — was handed straight to `updateRiskDisplay(data.risk_evaluation)`. Since `data.risk_evaluation` doesn't exist on an error response, this threw immediately on the very first line (`evalRes.risk_score` on `undefined`), and the raw exception — carrying that unformatted backend structure — surfaced directly in the user-facing `alert()`. Reproduced directly (not just inspected) by feeding `extractErrorMessage()` FastAPI's real error shapes for both failure modes and confirming the fix produces `"velocity_1h: Input should be greater than or equal to 0"` and `"velocity_1h is required when velocity_enabled=true"` respectively, instead of the raw object. **Resolution:** the fetch chain now checks `res.ok` before touching the body, routes any failure through a dedicated `extractErrorMessage()` that handles both FastAPI error shapes explicitly, adds a client-side pre-flight check so an empty/negative/non-numeric client velocity is rejected before the request is even sent, resets the field to its default whenever a demo preset is loaded (it previously only reset the enable toggle, leaving a stale typed value to resurface later), and adds the same `?? 0` fallback the risk-display code already had to the recent-transactions table renderer. See `tests/test_regressions.py::TestVelocityFieldErrorHandlingContract`.
+
+### Bug #27 — Every ambiguous-tier transaction was routed to a human, even maximally-confident fraud
+`hitl_required` fired on *any* policy reason (`MODEL_UNCERTAINTY`, `MODEL_DISAGREEMENT`, `HIGH_IMPACT`, `EVIDENCE_CONFLICT`, `NOVEL_BEHAVIOR`) once the transaction was MEDIUM tier or above, with no distinction between "the models genuinely disagree" and "the score is maxed out and every signal agrees." In practice a transaction the stacker scored at 0.97 with only a `NOVEL_BEHAVIOR` (high-velocity) reason attached went to the human queue exactly like one sitting at 0.36 in the `MODEL_UNCERTAINTY` band — the review workload scaled with tier instead of with actual ambiguity, which is the opposite of what a human-in-the-loop system is supposed to do. **Resolution:** added an `AUTO_BLOCK_THRESHOLD = 0.95` gate on the **raw** `stacker_calibrated_score` (not the velocity-inflated `final_risk_score`/`risk_tier` — `velocity_mult` can cap a 0.70 calibrated probability at a CRITICAL tier, and auto-blocking on that inflated number would let speed alone trigger an irreversible action). A `MANDATORY_HUMAN_REASONS` set (`MODEL_UNCERTAINTY`, `MODEL_DISAGREEMENT`, `EVIDENCE_CONFLICT`, `HIGH_IMPACT`) is carved out and always still routes to `HUMAN_REVIEW` regardless of confidence — model disagreement means "confidence" isn't trustworthy, and dual control on large-dollar transactions is a standard payments/AML control independent of model score. `NOVEL_BEHAVIOR` (velocity alone) is deliberately excluded from that mandatory set, since it's a pattern already folded into the score rather than an ambiguity signal. When confidence clears the threshold with none of the mandatory reasons present, `hitl_required=False` and `decision="BLOCK"` — `enqueue_review()` already gates strictly on `hitl_required`, so the transaction never reaches the queue. All 69 existing tests passed unmodified against the change.
 
 ### Regression contract
 `tests/test_regressions.py` turns the above findings into executable checks. `tests/test_risk_engine.py` covers the broader scoring pipeline, while `tests/GOLDEN_TEST_MATRIX.md` documents scenario-level PASS/PARTIAL/GAP expectations.
