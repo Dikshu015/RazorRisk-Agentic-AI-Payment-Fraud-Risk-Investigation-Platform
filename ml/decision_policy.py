@@ -21,6 +21,34 @@ HITL_REASONS = {
     "NOVEL_BEHAVIOR",
 }
 
+# Confidence floor above which the stacker's calibrated probability is
+# treated as decisive enough to act on without a human in the loop. Deliberately
+# read off the RAW stacker_calibrated_score (calibrated_prob), not the
+# velocity-inflated final_risk_score/risk_tier: velocity_mult can push a 0.70
+# calibrated probability up to a CRITICAL tier (100 capped), and auto-blocking
+# on that inflated number would mean "moved fast" alone could trigger an
+# irreversible action. Auto-block only fires on genuine model confidence.
+AUTO_BLOCK_THRESHOLD = 0.95
+
+# Reasons that indicate real ambiguity or a business requirement for a human
+# in the loop, and therefore should NEVER be bypassed by high model
+# confidence alone:
+#   - MODEL_UNCERTAINTY / MODEL_DISAGREEMENT / EVIDENCE_CONFLICT: the models
+#     (or model vs. evidence) don't agree, so "confidence" isn't trustworthy.
+#   - HIGH_IMPACT: dual control on large-dollar transactions is a standard
+#     payments/AML control (segregation of duties, audit trail, asymmetric
+#     cost of an autonomous false positive on a large transfer) independent
+#     of how confident the model is.
+# NOVEL_BEHAVIOR (high velocity alone) is deliberately excluded: velocity is
+# a pattern signal already folded into the score, not an ambiguity signal,
+# so it should not by itself override a high-confidence auto-block.
+MANDATORY_HUMAN_REASONS = {
+    "MODEL_UNCERTAINTY",
+    "MODEL_DISAGREEMENT",
+    "EVIDENCE_CONFLICT",
+    "HIGH_IMPACT",
+}
+
 
 def apply_decision_policy(txn: dict[str, Any], risk: dict[str, Any]) -> dict[str, Any]:
     tab = float(risk["tabular_score"]) / 100.0
@@ -98,7 +126,23 @@ def apply_decision_policy(txn: dict[str, Any], risk: dict[str, Any]) -> dict[str
         "MODEL_DISAGREEMENT" in reasons
     )
 
-    if hitl_required:
+    # Auto-block override: even when hitl_required tripped above (e.g. a
+    # CRITICAL-tier txn with a NOVEL_BEHAVIOR reason), a sufficiently
+    # confident, unambiguous stacker score should not still be routed to a
+    # human queue. Every fraud case landing on a human is what this override
+    # exists to fix: it only fires when confidence is decisive AND none of
+    # the mandatory-human reasons (disagreement/conflict/uncertainty/
+    # high-impact) are present.
+    auto_block = (
+        stack >= AUTO_BLOCK_THRESHOLD
+        and not (set(reasons) & MANDATORY_HUMAN_REASONS)
+    )
+    if auto_block:
+        hitl_required = False
+
+    if auto_block:
+        final_decision = "BLOCK"
+    elif hitl_required:
         final_decision = "HUMAN_REVIEW"
     elif risk["risk_tier"] == "CRITICAL":
         final_decision = "BLOCK_PENDING_REVIEW"
@@ -114,5 +158,6 @@ def apply_decision_policy(txn: dict[str, Any], risk: dict[str, Any]) -> dict[str
         "hitl_required": hitl_required,
         "review_reasons": reasons,
         "external_evidence": evidence,
-        "policy_version": "v2.0-confluence-hitl",
+        "auto_blocked": auto_block,
+        "policy_version": "v2.1-confidence-auto-block",
     }

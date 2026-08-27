@@ -1,4 +1,5 @@
-flowchart LR
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 50}}}%%
+flowchart TB
     T[Incoming transaction] --> F[Feature engineering]
     F --> V[Hourly velocity]
     F --> S[Security signals]
@@ -7,19 +8,26 @@ flowchart LR
     G --> GN[GNN node embedding]
     TM --> ST[Learned stacker]
     GN --> ST
-    ST --> CS[Calibrated score]
+    ST --> CS[Calibrated model score]
     V --> RA[Risk aggregation]
     S --> RA
     CS --> RA
     RA --> P[Decision policy]
-    P --> A[APPROVE]
-    P --> H[HOLD]
-    P --> B[BLOCK]
-    P --> R[HUMAN_REVIEW]
+    P --> M{Mandatory-human reason present?}
+    M -->|Yes, always| R[HUMAN_REVIEW]
+    M -->|No| C{Confidence >= 0.95?}
+    C -->|Yes| B[BLOCK — auto]
+    C -->|No| TIER{Risk tier}
+    TIER -->|LOW| A[APPROVE]
+    TIER -->|MEDIUM| MON[MONITOR]
+    TIER -->|HIGH| HOLD[HOLD_FOR_INVESTIGATION]
+    TIER -->|CRITICAL| BPR[BLOCK_PENDING_REVIEW]
     R --> Q[HITL queue]
     Q --> HR[Human reviewer]
     HR --> D[Final reviewer decision]
-    A --> AU[Audit log]
-    H --> AU
+    A --> AU[Audit trail]
+    MON --> AU
+    HOLD --> AU
+    BPR --> AU
     B --> AU
     D --> AU

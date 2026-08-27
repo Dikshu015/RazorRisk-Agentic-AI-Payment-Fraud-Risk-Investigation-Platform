@@ -1,3 +1,4 @@
+%%{init: {'flowchart': {'nodeSpacing': 32, 'rankSpacing': 55}}}%%
 flowchart TB
     subgraph Input[Input Layer]
         UI[Frontend Dashboard]
@@ -15,7 +16,7 @@ flowchart TB
         TAB[Tabular XGBoost]
         GNN[GraphSAGE]
         STACK[Learned logistic stacker]
-        POLICY[Risk aggregation + policy]
+        POLICY[Risk aggregation + policy<br/>incl. confidence auto-block]
         GUARD[Security guardrails]
         VEL[Velocity service]
     end
@@ -43,7 +44,7 @@ flowchart TB
     POLICY --> API
     POLICY --> EVID
     EVID --> LLM
-    POLICY --> HITL
+    POLICY -->|"only if mandatory-human<br/>reason, or confidence < 0.95"| HITL
     LLM --> HITL
     API --> AUDIT
     HITL --> AUDIT
