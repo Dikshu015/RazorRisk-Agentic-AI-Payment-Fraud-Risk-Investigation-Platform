@@ -105,3 +105,16 @@ CREATE TABLE IF NOT EXISTS human_reviews (
 
 CREATE INDEX IF NOT EXISTS idx_human_reviews_status ON human_reviews(status);
 CREATE INDEX IF NOT EXISTS idx_human_reviews_created ON human_reviews(created_at);
+
+-- Repeat-MEDIUM-risk watchlist (see ml/watchlist.py). One row per user_id:
+-- a MONITOR decision (re)sets expires_at WATCHLIST_TTL_HOURS out; the row
+-- is read (not deleted) by the next scoring call and left to expire via TTL.
+CREATE TABLE IF NOT EXISTS user_watchlist (
+    user_id VARCHAR(50) PRIMARY KEY REFERENCES users(user_id),
+    reason VARCHAR(50) NOT NULL,
+    source_transaction_id VARCHAR(50),
+    flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_expires ON user_watchlist(expires_at);
