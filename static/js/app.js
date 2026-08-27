@@ -81,6 +81,12 @@ function initVelocitySourceToggle() {
 
 // Preset Scenario Handlers
 function loadPreset(type) {
+    // Every preset resets velocity_1h back to its default alongside
+    // disabling the client-velocity toggle — previously only the toggle
+    // was reset, so a value typed in while it was ON (including an invalid
+    // one) silently survived a preset switch and could resurface later if
+    // the toggle was re-enabled without the field being looked at again.
+    document.getElementById('velocity_1h').value = '1';
     if (type === 'normal') {
         document.getElementById('user_id').value = 'USER_0042';
         document.getElementById('device_id').value = 'DEV_0088';
@@ -139,7 +145,21 @@ function handleTransactionScore(e) {
         is_suspicious_proxy: document.getElementById('is_suspicious_proxy').checked
     };
     if (trustClientVelocity) {
-        payload.velocity_1h = parseInt(document.getElementById('velocity_1h').value, 10);
+        const rawVelocity = document.getElementById('velocity_1h').value;
+        const parsedVelocity = parseInt(rawVelocity, 10);
+        // parseInt('', 10) and parseInt('abc', 10) both return NaN, which
+        // JSON.stringify silently turns into `null` — that null then fails
+        // Pydantic's `ge=0` check server-side with no client-side warning
+        // at all, so the request round-trips just to come back rejected.
+        // Catching it here means a bad value never leaves the browser, and
+        // the message is exact instead of "leaking" a backend error shape.
+        if (Number.isNaN(parsedVelocity) || parsedVelocity < 0) {
+            btn.innerText = 'Score Transaction & Run AI Engine';
+            btn.disabled = false;
+            alert('Client velocity must be a whole number of 0 or more.');
+            return;
+        }
+        payload.velocity_1h = parsedVelocity;
     }
 
     fetch(`${API_BASE}/api/v1/transactions/score`, {
@@ -147,8 +167,24 @@ function handleTransactionScore(e) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
     })
-    .then(res => res.json())
-    .then(data => {
+    .then(res => res.json().then(data => ({ ok: res.ok, status: res.status, data })))
+    .then(({ ok, status, data }) => {
+        if (!ok) {
+            // The backend can reject this specific form on velocity_1h alone
+            // (Pydantic's `ge=0` on the field, plus risk_aggregator.py's
+            // "velocity_1h is required when velocity_enabled=true" check) —
+            // every other field here is an unconstrained string/number, so
+            // this is the one realistic way a validation error reaches this
+            // handler. `data.detail` can be either a plain string (the
+            // ValueError case) or FastAPI's list-of-objects shape (the
+            // Pydantic case: [{type, loc, msg, input, ctx, url}, ...]) —
+            // both used to fall straight through to `updateRiskDisplay`,
+            // which crashed on the missing `risk_evaluation` key and threw
+            // that raw structure into the user-facing alert. Extract a
+            // clean, human-readable message here instead, and stop before
+            // ever calling updateRiskDisplay with no evaluation to show.
+            throw new Error(extractErrorMessage(data, status));
+        }
         // Risk score renders the moment it's back — it no longer waits on
         // the (potentially several-seconds, LLM-backed) investigation step.
         btn.innerText = 'Score Transaction & Run AI Engine';
@@ -184,6 +220,24 @@ function handleTransactionScore(e) {
         btn.disabled = false;
         alert('Could not evaluate this transaction: ' + err.message);
     });
+}
+
+// Turns a FastAPI/Pydantic error body into one readable line instead of
+// letting its raw shape reach the user. `detail` is a plain string for a
+// manually-raised backend error (e.g. risk_aggregator.py's ValueError), or
+// a list of {loc, msg, ...} objects for a Pydantic field-validation error
+// (e.g. velocity_1h failing `ge=0`) — both are handled explicitly here so
+// neither ever "leaks" its raw structure into an alert box again.
+function extractErrorMessage(data, status) {
+    const detail = data && data.detail;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail) && detail.length) {
+        return detail.map(e => {
+            const field = Array.isArray(e.loc) ? e.loc[e.loc.length - 1] : 'field';
+            return `${field}: ${e.msg}`;
+        }).join('; ');
+    }
+    return `Request failed (HTTP ${status})`;
 }
 
 function updateRiskDisplay(evalRes) {
@@ -368,7 +422,7 @@ function loadRecentTransactions() {
             data.transactions.forEach(t => {
                 const tr = document.createElement('tr');
                 const tierClass = `tier-pill tier-${(t.risk_tier || 'unscored').toLowerCase()}`;
-                const velocityLabel = `${t.velocity_source || 'BACKEND'} · ${t.velocity_1h}/h`; 
+                const velocityLabel = `${t.velocity_source || 'BACKEND'} · ${t.velocity_1h ?? 0}/h`; 
                 tr.innerHTML = `
                     <td><code>${escapeHtml(t.transaction_id)}</code></td>
                     <td><code>${escapeHtml(t.user_id)}</code></td>
