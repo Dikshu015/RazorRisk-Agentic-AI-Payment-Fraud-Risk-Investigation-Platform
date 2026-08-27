@@ -8,6 +8,36 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 
 ---
 
+## Highlights
+
+- **Learned score fusion with graph evidence as a real input** — a logistic-regression stacker combines the tabular score, the GNN score, *and* normalized shared-device/shared-IP counts, instead of a fixed `0.35/0.45/0.20` formula or a hand-picked connectivity rule bolted on afterward (see Bug 18 below for why the rule version was retired).
+- **GraphSAGE GNN written from scratch in NumPy** — a 2-layer mean-aggregation implementation with manual forward/backward passes and a genuine inductive inference path for brand-new users, kept dependency-light at this project's ~1,500-node scale.
+- **Two graphs, on purpose** — a canonical User-only risk graph feeds the GNN and community detection; a richer User/Device/IP/Merchant graph powers dashboard visualization only. They're split because merging them once turned a 7-person fraud ring into a 692-node subgraph through one popular merchant (Bug 1).
+- **Real human-in-the-loop workflow** — `HUMAN_REVIEW` creates an actual persisted, idempotent queue record with a `review_id`, not just a UI label (Bug 16).
+- **Explicit, audited velocity source** — a frontend toggle chooses between trusting client-supplied velocity (simulation) and backend-computed velocity from transaction history (production-oriented); the effective source is recorded on every transaction (Bugs 14, 15, 21).
+- **Dual-mode investigation agent** — Anthropic / Groq / OpenAI when configured, with a complete deterministic rule-based fallback when no provider is available or a call fails. Every report records which mode actually ran.
+- **Evidence-grounded investigation** — four deterministic tools (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`) compute the underlying evidence; an LLM, when available, interprets it rather than inventing it.
+- **Two honest, separately-scoped evaluations** — a controlled synthetic benchmark for graph/fraud-ring behavior, and a real external ROC-AUC/PR-AUC/precision/recall/F1 run on the ULB/Kaggle Credit Card Fraud dataset for the tabular component, never conflated with each other.
+- **A golden adversarial test matrix** — `tests/GOLDEN_TEST_MATRIX.md` checks the trained model against dozens of named fraud-ring and benign-look-alike scenarios (hostel Wi-Fi, carrier-NAT, festival sales, family devices) and discloses, by name, the cases that are still gaps rather than claiming full coverage.
+- **A published bug history, not just a feature list** — 25 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
+- **One honest data layer** — a single raw-`sqlite3` path; a decorative, never-queried SQLAlchemy/Postgres path from an earlier iteration was removed entirely rather than left half-wired (Bug 12).
+
+---
+
+## Live Demo / Screenshots
+
+| | |
+|---|---|
+| **Dashboard** — live transaction feed with risk tiers (`LOW`/`HIGH`) and actions (`APPROVE`/`HOLD_FOR_INVESTIGATION`), a real-Kaggle-data row (`TXN_REAL_014054`) sitting alongside synthetic fraud-ring rows, and the "Load real Kaggle dataset" / "Reseed synthetic data" controls from the additive-ingestion fix (Bug 22) | ![Dashboard](image.png) |
+| **Graph topology explorer** — the interactive User↔Device↔IP↔Merchant visualization graph, showing a 7-user fraud ring converging on one shared device and one flagged merchant | ![Graph topology view](image-3.png) |
+| **Live stream** — the recent-transactions table and the audit log view, correlation-ID-traceable, showing the actual learned stacker weights (`tabular_coef`, `gnn_coef`) from the last training run | ![Live stream](image-4.png) ![Live stream detail](image-5.png) |
+| **Evidence / Agent mode** — a live Groq-backed LangGraph investigation for `USER_RING1_1`: graph evidence (7 linked accounts, shared device, TOR proxy), a risk score of 89.2/100, and a `HOLD_FOR_INVESTIGATION` decision, next to the mode-selector showing `Auto (priority order)` and `Groq (Auto)` | ![Agent investigation report](image-1.png) ![Agent evidence breakdown](image-2.png) |
+| **Audit system logs** — the risk-engine and agent-investigation log channels side by side, correlation-ID-traceable | ![Audit system logs](image-6.png) |
+
+Screenshots reflect the actual seeded dataset and a live LLM call where noted — see [Suggested Demo Flow](#suggested-demo-flow) for what to expect if you reproduce them, and the [Evaluation](#evaluation) section for what the risk scores shown do and don't claim.
+
+---
+
 ## Why RazorRisk?
 
 A conventional fraud classifier looks like:
@@ -535,9 +565,31 @@ Direct tests could hit SQLite tables before the application startup path initial
 
 **Resolution:** initialize the test database schema explicitly in `tests/conftest.py`.
 
-Current regression suite:
+Current regression suite (after Bugs 18–26 below added their own coverage):
 
-**63 tests passed.**
+**69 tests passed.**
+
+### Bugs 7–13 — Earlier architecture and deployment fixes
+
+Before the six bugs above, an earlier phase of the project fixed seven more foundational issues: a graph-traversal bug that turned a 7-person fraud ring into a 692-node subgraph, a Groq provider that appeared configured but silently fell back, a new-user GNN path that used a cached lookup instead of a real inductive forward pass, hand-picked `0.35/0.45/0.20` fusion weights, a train/test split that could leak the same user across both sets, an untraceable transaction across log channels, and a decorative SQLAlchemy/Postgres path that a deployment auto-detector mistook for a real dependency. Full descriptions, plus three more deployment-specific fixes (#11–13): **[PROJECT_WORKFLOW.md § 4](PROJECT_WORKFLOW.md#4-deployment--ops)**.
+
+### Bugs 18–25 — Found after the architecture looked "done"
+
+Six more bugs surfaced from actually running scenarios end-to-end rather than trusting the design, spanning three phases: closing a false-positive gap in scoring, discovering the *same* gap re-appearing in a different file, and later disclosing that a scenario and a test file were themselves subtly wrong.
+
+| # | Bug | One line |
+|---|---|---|
+| 18 | Connectivity alone was scored as fraud | A rule fired on `shared_ip >= 5` alone, with no behavioral anomaly required — flagged a 40-person carrier-NAT IP and a 7-person hostel |
+| 19 | The same false positive resurfaced in the investigator | Fixing the *scorer* didn't fix `deterministic_agent.py`, which had its own independent, unfixed copy of the same connectivity-only rule |
+| 20 | A performance shortcut reopened a client-trust gap | A "fast path" skipped graph/GNN evaluation based partly on a still-client-suppliable `velocity_1h` |
+| 21 | Velocity was trusted from the client in three places | `decision_policy.py`, `FraudModelTool`, and `graph_agent.py` each read velocity from the payload independently instead of one server-computed value |
+| 22 | Real-data ingestion deleted the golden test matrix | `ingest_real_kaggle_dataset.py` opened with `DELETE FROM users` before loading Kaggle data, wiping every named fraud-ring/benign scenario |
+| 23 | The investigation endpoint had no necessity guard | Any transaction ID could trigger a full (billable) LLM investigation — the risk-threshold check only ever existed in the frontend |
+| 24 | A "legitimate but unusual" scenario was statistically identical to fraud | Empirically scored HIGH — a real, disclosed limitation of amount-deviation-only reasoning, not a hidden bug |
+| 25 | A test class after `if __name__ == "__main__"` never ran directly | `unittest discover` caught all tests; running the file directly silently dropped the last class with no error |
+| 26 | A backend validation error leaked its raw error body into the UI | `velocity_1h`'s validation failure (the only field with backend constraints) crashed `updateRiskDisplay` and dumped FastAPI's raw error shape into a user-facing `alert()` |
+
+Full write-ups, each with what broke it, how it was verified, and why the fix is the right one — not just what the fix was — are in **[PROJECT_WORKFLOW.md § 4.5, Bugs #18–26](PROJECT_WORKFLOW.md#45-bugs--regression-history)**.
 
 ---
 
@@ -568,7 +620,49 @@ pytest -q
 
 Expected current result:
 
-**63 tests passed.**
+**69 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–26 did).
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Purpose |
+|---|---|---|
+| API | FastAPI, Uvicorn, Pydantic | Typed REST gateway and OpenAPI docs |
+| Database | SQLite (raw `sqlite3`), single file | Zero-setup local persistence — no server process, no ORM (see Bug 12) |
+| Tabular ML | XGBoost; scikit-learn fallback | Transaction-level behavioral risk |
+| Graph ML | NumPy GraphSAGE (from scratch) | User-level relational risk |
+| Graph | NetworkX + Louvain | User risk communities and dashboard topology |
+| Score fusion | scikit-learn Logistic Regression | Learned tabular + GNN + graph-evidence combination |
+| Security | `security/guardrails.py`, `security/evidence_api.py` | Explicit, deterministic risk overlays separate from learned scores |
+| Agent | LangChain / LangGraph | Investigation orchestration |
+| LLMs | Anthropic / Groq / OpenAI (optional) | Evidence interpretation and report writing |
+| Fallback | Plain Python rules (`agent/deterministic_agent.py`) | Complete offline investigation path |
+| Frontend | Vanilla HTML/CSS/JS | No frontend build step |
+| Visualization | vis-network, marked.js | Interactive entity graph + Markdown report rendering |
+| Logging | Rotating-file logger, 8 channels | Correlation-ID-traceable audit trail |
+| Deployment | Render, Antideploy, Hugging Face Spaces, Vercel, Docker | Backend/container/static deployment options |
+
+---
+
+## Deployment
+
+Two platforms, split deliberately — a size constraint, not a preference. The backend's dependency stack (XGBoost, SciPy, scikit-learn, LangChain provider packages) installs to roughly 2GB; Vercel's serverless Python functions cap out around 250MB unzipped, so the backend cannot run there as a function regardless of configuration.
+
+| Platform | Hosts | Card / paid tier required? | Notes |
+|---|---|---|---|
+| **Render** | Full backend | Sometimes, for web services (free tier increasingly prompts for a payment method) | `render.yaml` drives the full build: install deps, generate synthetic data, train tabular + GNN + stacker, so the first request after deploy is already warm |
+| **Antideploy** | Full backend | Not confirmed either way | Auto-detects FastAPI + port 8000 from `requirements.txt`, no Dockerfile/YAML needed. Runs on Google Cloud Run |
+| **Hugging Face Spaces** | Full backend (Docker) | Yes, as of mid-2026 — Docker SDK Spaces require HF PRO for personal accounts | Repo includes `Dockerfile` and `SPACE_README.md` (rename to `README.md` inside the Space's own repo) |
+| **Vercel** *(optional)* | Static dashboard only | No | `vercel.json` deploys `static/` as a plain static site; set `window.RAZORRISK_API_BASE` to the deployed backend's URL |
+
+The app detects which of these it's running on automatically — `config.py`'s `IS_RESTRICTED_FS` checks for `VERCEL`, `SPACE_ID`, or `K_SERVICE` (set by Cloud Run on every service, which is what Antideploy runs on — see Bug 13) — and redirects the SQLite database and log files to `/tmp` accordingly, since all three ephemeral-filesystem platforms wipe or restrict writes to the main filesystem between deploys.
+
+Full deployment write-up, including what had to change in the code to make each platform work and the three bugs (#11–13) it surfaced: **[PROJECT_WORKFLOW.md § 4](PROJECT_WORKFLOW.md#4-deployment--ops)**.
+
+```bash
+docker compose up --build
+```
 
 ---
 
@@ -616,14 +710,15 @@ Set only the provider/API keys required for the investigation mode you want to u
 ### 5. Generate synthetic data
 
 ```bash
-python data/generate_synthetic_data.py
+python -m data.generate_synthetic_data
 ```
 
 ### 6. Train models
 
 ```bash
-python ml/train_tabular_model.py
-python ml/train_gnn.py
+python -m ml.train_tabular_model
+python -m ml.train_gnn
+python -m ml.risk_aggregator
 ```
 
 ### 7. Start the API
@@ -668,6 +763,48 @@ For a short technical demo:
 - `README.md`
 - `PROJECT_WORKFLOW.md`
 - `requirements.txt`
+
+---
+
+## API Reference
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | Redirects to `/dashboard/` |
+| `/health` | GET | Health check |
+| `/api/v1/stats` | GET | Dashboard summary counts (transactions, high-risk, investigations, pending reviews) |
+| `/api/v1/transactions/score` | POST | Score a transaction (tabular + GNN + stacker + overlays) |
+| `/api/v1/transactions/recent` | GET | Recent transaction feed for the dashboard |
+| `/api/v1/graph/topology/{user_id}` | GET | Bounded User/Device/IP/Merchant graph view for the topology explorer |
+| `/api/v1/graph/communities` | GET | Retrieve detected graph communities |
+| `/api/v1/investigations/run/{id}` | POST | Run the investigation agent (server-side necessity guard — see Bug 23; pass `?force=true` to override) |
+| `/api/v1/investigations/{id}` | GET | Fetch a saved investigation report |
+| `/api/v1/investigations/agent-status` | GET | Which provider/mode is actually active right now |
+| `/api/v1/investigations/agent-mode` | POST | Force an agent mode override |
+| `/api/v1/hitl/queue` | GET | Pending human-review queue |
+| `/api/v1/hitl/review/{review_id}` | POST | Resolve a pending review (`APPROVE` / `HOLD` / `BLOCK`) |
+| `/api/v1/hitl/transaction/{transaction_id}` | GET | Look up the review record tied to a specific transaction |
+| `/api/v1/admin/pipeline/synthetic` | POST | Reseed synthetic data + retrain the full pipeline |
+| `/api/v1/admin/pipeline/real` | POST | Ingest the ULB/Kaggle dataset (additively — see Bug 22) + retrain |
+| `/api/v1/admin/rebuild-graph` | POST | Rebuild the in-memory visualization graph from current DB state |
+| `/api/v1/logs/stream` | GET | Stream the 8 audit/system log channels |
+| `/api/v1/logs/client` | POST | Report uncaught frontend errors into the server audit trail |
+
+Full interactive documentation (request/response schemas, try-it-out) is at `/docs` when the backend is running.
+
+### Agent mode control
+
+The dashboard's `/api/v1/investigations/agent-status` and `/api/v1/investigations/agent-mode` endpoints support forcing the investigation path to one of:
+
+```text
+auto            — try a configured LLM provider, fall back to deterministic on failure
+anthropic       — force Claude
+groq            — force Groq
+openai          — force OpenAI
+deterministic   — force the rule-based fallback, regardless of configured keys
+```
+
+The override is held in memory and resets to `auto` on restart. Every investigation report records the mode that *actually ran* — including `deterministic_fallback` when a configured provider was attempted but failed — so the report never implies an LLM call happened when it didn't.
 
 ---
 
@@ -792,6 +929,52 @@ The project uses a compact architecture suitable for demonstration and experimen
 ### 9. Metrics are benchmark-specific
 
 The reported scores should be read as results on the specified datasets and splits, not as universal claims about payment fraud detection.
+
+---
+
+## FAQ
+
+**Why a GNN instead of only XGBoost?**
+XGBoost evaluates each transaction row independently. A GNN can pull in information from *connected* users — shared device/IP relationships — so several individually ordinary-looking accounts can still produce a strong network-level signal when they're part of the same fraud ring.
+
+**Why GraphSAGE specifically?**
+It uses neighborhood aggregation and supports inductive inference — a brand-new user who wasn't in the training graph can still get a real forward-pass score, not just a lookup. See "Can a new user receive a GNN score?" below.
+
+**Why implement GraphSAGE from scratch instead of using PyTorch Geometric or DGL?**
+The project graph is roughly 1,500 nodes. A 2-layer mean-aggregation implementation in NumPy kept the dependency footprint small and made the forward/backward math directly inspectable — useful for a project meant to demonstrate understanding, not just call a library.
+
+**How was the 692-node graph explosion (Bug 1) actually produced?**
+The original graph mixed Users, Devices, IPs, and Merchants in one structure. A 2-hop traversal from a fraud-ring user could reach a Merchant used by hundreds of unrelated people, and traversing *from* that Merchant reached all of them. The fraud ring itself was still 7 people — the traversal was following a high-degree shared Merchant edge, not a real fraud relationship. Fixed by splitting the canonical User-only risk graph (used for GNN training and community detection) from the richer visualization graph (Users/Devices/IPs/Merchants, used only for the dashboard topology explorer).
+
+**Can a new user actually receive a GNN score, or does it need to have been in training?**
+Yes — `GraphSAGEInference.score_all()` performs a real inductive forward pass using the user's current graph position, not a cached training-time lookup. This was itself a fix (see Bugs #1–13 in `PROJECT_WORKFLOW.md`).
+
+**Why a learned stacker instead of just averaging the tabular and GNN scores?**
+A fixed formula assumes you already know the right relative weight for each signal. The logistic-regression stacker learns the combination from held-out data — and, as of Bug 18, also takes normalized shared-device/shared-IP counts as real inputs, rather than using connectivity as a separate hand-picked rule layered on top.
+
+**Does the LLM calculate the risk score?**
+No. Risk scoring is entirely the ML/graph/policy pipeline's job, computed before any LLM is invoked. The investigation agent receives deterministic evidence (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool` output) and uses the LLM, when available, to interpret and narrate that evidence — never to compute it.
+
+**Can the LLM invent a metric or override the score?**
+No path in the architecture gives it that responsibility. The narrative it produces can still contain language-model errors, which is exactly why the structured evidence — not the prose — remains the source of truth, and why every report is tagged with the `agent_mode` that actually ran.
+
+**Is the agent always using an LLM?**
+No. If no provider is configured, a configured provider fails, or the mode is forced to `deterministic`, RazorRisk uses the complete rule-based fallback in `agent/deterministic_agent.py` and records `deterministic_fallback` as the mode — it never silently pretends an LLM call happened.
+
+**Why isn't the risk score waiting for the investigation to finish?**
+Different latency requirements: `/api/v1/transactions/score` returns the risk evaluation immediately; the dashboard makes a separate `/api/v1/investigations/run/{id}` request only for transactions that actually need it (see Bug 23's server-side guard).
+
+**Is `HUMAN_REVIEW` just a label, or does it do anything?**
+It creates a real, idempotent `human_reviews` queue record with a `review_id` after the transaction and risk score are committed — see Bug 16. A reviewer resolves it through `/api/v1/hitl/review/{review_id}`, and that resolution updates the transaction's final decision.
+
+**Does this use Postgres?**
+No — an earlier iteration had a parallel SQLAlchemy engine intended to support Postgres via `DATABASE_URL`, but nothing in the application ever actually queried through it; every real read/write always went through raw `sqlite3`. It was removed rather than left half-wired (Bug 12).
+
+**Is this production fraud detection?**
+No. It's a project demonstrating a payment-risk architecture. The graph relationships are synthetic by construction for the graph benchmark, and the public ULB/Kaggle dataset doesn't expose the identity relationships needed to validate a real production fraud graph — see [Limitations and Defensible Scope](#limitations-and-defensible-scope).
+
+**Why is there a velocity/proxy rule overlay if the stacker already exists?**
+The stacker combines *learned* tabular and graph signals. Velocity thresholds and proxy/VPN flags are operational business rules RazorRisk treats as an explicit, separately-labeled overlay rather than hiding them inside an opaque model weight — so a risk manager can see and adjust them without retraining anything.
 
 ---
 

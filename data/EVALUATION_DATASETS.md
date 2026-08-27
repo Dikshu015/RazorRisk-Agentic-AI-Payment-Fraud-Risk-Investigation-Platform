@@ -1,45 +1,68 @@
-import sqlite3
-import os
-from config import DATABASE_URL, BASE_DIR, SQLITE_DB_PATH
-from utils.logger import get_logger
+# Evaluation Datasets
 
-logger = get_logger("database")
+RazorRisk reports two deliberately separate evaluation tracks.
 
-# Historical note: an earlier version carried an unused SQLAlchemy/Postgres ORM
-# path alongside the real sqlite3 implementation. It was removed because every
-# application query already used raw sqlite3 and the two paths were not actually
-# interoperable. RazorRisk intentionally has one application-owned SQLite data
-# layer today. See PROJECT_WORKFLOW.md for the migration history.
+## 1. Project synthetic dataset
 
-def init_db():
-    """Initialize database tables using schema.sql (SQLite only — see note above)."""
-    logger.info(f"Initializing database using connection target: {DATABASE_URL}")
-    schema_path = BASE_DIR / "db" / "schema.sql"
-    db_file = str(SQLITE_DB_PATH)
-    conn = sqlite3.connect(db_file)
-    with open(schema_path, "r", encoding="utf-8") as f:
-        conn.executescript(f.read())
+Used for:
 
-    # Lightweight SQLite migrations for databases created by older RazorRisk
-    # versions. schema.sql handles fresh installs; these ALTERs keep an
-    # existing demo DB usable after upgrading the application.
-    def add_column_if_missing(table, column, definition):
-        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-            logger.info(f"Database migration: added {table}.{column}")
+- user/device/IP graph construction;
+- fraud-ring and benign-look-alike scenarios;
+- GNN/community evaluation;
+- end-to-end risk-policy regression testing.
 
-    add_column_if_missing("transactions", "velocity_enabled", "BOOLEAN DEFAULT 0")
-    add_column_if_missing("transactions", "velocity_source", "TEXT DEFAULT 'BACKEND'")
-    add_column_if_missing("risk_scores", "stacker_calibrated_score", "FLOAT NOT NULL DEFAULT 0.0")
+Latest reproducible run:
 
-    conn.commit()
-    conn.close()
-    logger.info(f"SQLite database schema applied successfully at {db_file}")
+| Model | ROC-AUC | PR-AUC | Accuracy | Balanced Accuracy | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Tabular / XGBoost | 0.855892 | 0.637720 | 0.981179 | 0.773541 | 0.944444 | 0.548387 | 0.693878 |
+| GraphSAGE / GNN | 0.948412 | 0.696521 | 0.978670 | 0.725806 | 1.000000 | 0.451613 | 0.622222 |
+| Learned stacker | 0.938937 | 0.713269 | 0.982434 | 0.774194 | 1.000000 | 0.548387 | 0.708333 |
 
-def get_raw_sqlite_connection():
-    """Get direct sqlite connection for pandas / graph queries.
-    Uses the same path config.py's DATABASE_URL was built from — was
-    previously hardcoded to BASE_DIR (read-only on Vercel/HF Spaces/
-    Antideploy), silently ignoring DATABASE_URL entirely."""
-    return sqlite3.connect(str(SQLITE_DB_PATH))
+Run:
+
+```bash
+python tests/evaluate_models.py --dataset synthetic
+python tests/evaluate_models.py --dataset synthetic --retrain
+```
+
+These metrics describe a controlled synthetic benchmark and must not be interpreted as production fraud-detection performance.
+
+## 2. ULB Credit Card Fraud Detection / Kaggle
+
+The supplied `creditcard.csv` contains:
+
+- 284,807 transactions;
+- 492 fraud transactions;
+- `Time`, `Amount`, `V1`–`V28`, and `Class`.
+
+The dataset does **not** expose stable user/device/IP identities. Therefore the external benchmark evaluates only the tabular model. RazorRisk does not fabricate graph relationships for this benchmark.
+
+### Actual run used in the README
+
+Chronological 80/20 split:
+
+- train: 227,845 rows, 417 fraud;
+- test: 56,962 rows, 75 fraud.
+
+| Metric | XGBoost |
+|---|---:|
+| ROC-AUC | **0.986233** |
+| PR-AUC | **0.792616** |
+| Accuracy | **0.999579** |
+| Balanced Accuracy | **0.873289** |
+| Precision | **0.918033** |
+| Recall | **0.746667** |
+| F1 | **0.823529** |
+| TP | 56 |
+| FP | 5 |
+| FN | 19 |
+| TN | 56,882 |
+
+Reproduce:
+
+```bash
+python tests/evaluate_models.py --dataset kaggle --csv data/creditcard.csv
+```
+
+The evaluator prints the exact train/test counts, metrics, and confusion matrix.
