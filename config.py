@@ -58,6 +58,19 @@ DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
 # Risk threshold triggering agent investigation
 HIGH_RISK_THRESHOLD = 70.0
 
+# --- Repeat-MEDIUM-risk watchlist ---
+# A transaction that resolves to MONITOR (MEDIUM tier, no HITL, no
+# confidence auto-block) soft-flags its user for WATCHLIST_TTL_HOURS. Their
+# next transaction gets an explicit, separately-labeled score multiplier —
+# the same pattern as the velocity/proxy overlay — so consecutive
+# medium-risk behavior compounds instead of resetting to a clean slate on
+# every request. See ml/watchlist.py. Deliberately NOT a HITL trigger by
+# itself: this tightens the automated tiering/auto-block path rather than
+# creating more human review work (ml/decision_policy.py's
+# MANDATORY_HUMAN_REASONS is unaffected by it).
+WATCHLIST_TTL_HOURS = int(os.getenv("WATCHLIST_TTL_HOURS", 24))
+WATCHLIST_SCORE_MULTIPLIER = float(os.getenv("WATCHLIST_SCORE_MULTIPLIER", 1.2))
+
 # Rolling window (days) for the amount_zscore_prior feature (both offline
 # training in ml/train_tabular_model.py and live scoring in
 # ml/risk_aggregator.py use this SAME constant) — a user's "normal" amount
