@@ -1,7 +1,6 @@
 import threading
 from fastapi import APIRouter, HTTPException
 from data.generate_synthetic_data import generate_dataset
-from data.ingest_real_kaggle_dataset import ingest_real_dataset
 from ml.graph_builder import graph_builder
 from ml.risk_aggregator import train_stacker, _LiveModels
 from utils.logger import get_logger
@@ -56,38 +55,6 @@ def run_synthetic_pipeline(num_users: int = 1500, num_transactions: int = 12000)
         # internal identifiers and reads as an alarming stack trace in the UI).
         logger.error(f"Synthetic pipeline failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Synthetic data pipeline failed. Check logs/app.log for details.")
-
-
-@router.post("/pipeline/real")
-def run_real_pipeline(sample_size: int = 15000):
-    """
-    Downloads (or reuses a locally cached copy of) the real ULB/Kaggle
-    Credit Card Fraud dataset, maps its real amounts + real fraud labels onto
-    RazorRisk's User/Device/IP/Merchant graph schema, and retrains both ML
-    models on it. Falls back with a clear, actionable error if this
-    environment has no outbound network access.
-    """
-    try:
-        logger.info("Admin: running REAL (Kaggle) data pipeline...")
-        if not _pipeline_lock.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="A data pipeline run is already in progress — please wait for it to finish.")
-        try:
-            count = ingest_real_dataset(sample_size=sample_size)
-            eval_metrics = _rebuild_graph_and_retrain()
-        finally:
-            _pipeline_lock.release()
-        return {"status": "OK", "mode": "real_kaggle", "transactions_ingested": count, "eval_metrics": eval_metrics}
-    except HTTPException:
-        raise
-    except RuntimeError as e:
-        # download_real_dataset() raises RuntimeError with an already
-        # actionable, user-safe message (e.g. manual-download instructions)
-        # — safe to forward as-is.
-        logger.warning(f"Real-data pipeline could not run: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e:
-        logger.error(f"Real-data pipeline failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Real-data pipeline failed unexpectedly. Check logs/app.log for details.")
 
 
 @router.post("/rebuild-graph")
