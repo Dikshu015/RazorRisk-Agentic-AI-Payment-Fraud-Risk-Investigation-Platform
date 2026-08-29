@@ -142,7 +142,8 @@ def fetch_node_features(conn, G: nx.Graph, community_size: dict):
         SELECT user_id, MAX(cnt) FROM (
             SELECT user_id, strftime('%Y-%m-%d %H', timestamp) AS hb, COUNT(*) AS cnt
             FROM transactions GROUP BY user_id, hb
-        ) GROUP BY user_id
+        ) AS hourly_counts
+        GROUP BY user_id
     """)
     max_hourly = {r[0]: r[1] for r in cur.fetchall()}
 
