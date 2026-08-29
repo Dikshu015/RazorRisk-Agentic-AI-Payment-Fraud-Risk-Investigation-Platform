@@ -21,10 +21,13 @@ RUNTIME_DIR = Path("/tmp") if IS_RESTRICTED_FS else BASE_DIR
 
 # Settings
 SQLITE_DB_PATH = RUNTIME_DIR / "razor_risk.db"
-# SQLite-only — see db/database.py for why the earlier Postgres-via-
-# DATABASE_URL path was removed rather than kept half-wired. This is now
-# only used for the startup log line showing where the DB actually lives.
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{SQLITE_DB_PATH}")
+# PostgreSQL is the production/default data plane. Set DATABASE_URL to a
+# managed Postgres/Supabase connection string in production. SQLite is an
+# explicit fallback for tests and zero-infrastructure local work only.
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgrespassword@localhost:5432/razor_risk")
+DATABASE_BACKEND = "postgresql" if DATABASE_URL.startswith(("postgresql://", "postgres://", "postgresql+")) else "sqlite"
+DB_POOL_MIN = int(os.getenv("DB_POOL_MIN", "2"))
+DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
 LOG_DIR = RUNTIME_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -54,6 +57,19 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+
+# CORS: defaults to "*" so the dashboard and Vercel's static-only deployment
+# (which calls this API cross-origin, see README's Deployment section) work
+# with zero config out of the box. Set ALLOWED_ORIGINS to a comma-separated
+# list (e.g. "https://your-app.vercel.app") to lock this down in production.
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+
+# Optional API key gate for /api/v1/* (api/main.py). Empty (the default)
+# means no auth is enforced, matching this project's existing permissive
+# local/demo posture. Set API_KEY to require an `X-API-Key` header matching
+# it on every /api/v1/* request; /health and /dashboard stay open either way.
+API_KEY = os.getenv("API_KEY", "")
 
 # Risk threshold triggering agent investigation
 HIGH_RISK_THRESHOLD = 70.0
