@@ -28,6 +28,14 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgrespassword
 DATABASE_BACKEND = "postgresql" if DATABASE_URL.startswith(("postgresql://", "postgres://", "postgresql+")) else "sqlite"
 DB_POOL_MIN = int(os.getenv("DB_POOL_MIN", "2"))
 DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
+# libpq's own connect_timeout has no default, so an unreachable/firewalled
+# Postgres host (wrong DATABASE_URL, DB paused, etc.) hangs psycopg.connect()
+# on the TCP handshake indefinitely instead of raising. Since init_db() runs
+# inside the FastAPI lifespan startup — before the port is ever bound — that
+# hang is what stalls the whole boot on PaaS platforms. 5s is generous for
+# any real network path; a bad host now fails loudly in seconds instead of
+# silently for minutes.
+DB_CONNECT_TIMEOUT_SECONDS = int(os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "5"))
 LOG_DIR = RUNTIME_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 

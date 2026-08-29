@@ -9,7 +9,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from config import DATABASE_URL, BASE_DIR, SQLITE_DB_PATH
+from config import DATABASE_URL, BASE_DIR, SQLITE_DB_PATH, DB_CONNECT_TIMEOUT_SECONDS
 from utils.logger import get_logger
 
 logger = get_logger("database")
@@ -174,7 +174,16 @@ def _connect_postgres():
     for prefix in ("postgresql+psycopg://", "postgresql+psycopg2://"):
         if url.startswith(prefix):
             url = "postgresql://" + url[len(prefix):]
-    return _PGConnection(psycopg.connect(url))
+    try:
+        return _PGConnection(psycopg.connect(url, connect_timeout=DB_CONNECT_TIMEOUT_SECONDS))
+    except Exception as exc:
+        logger.error(
+            "Could not reach Postgres at target host within %ss "
+            "(DATABASE_URL host is unreachable/wrong, or the DB is down): %s",
+            DB_CONNECT_TIMEOUT_SECONDS,
+            exc,
+        )
+        raise
 
 
 def get_raw_sqlite_connection():
@@ -246,3 +255,4 @@ def read_sql_query(sql, params=None):
         return pd.read_sql_query(query, engine, params=params)
     finally:
         engine.dispose()
+        

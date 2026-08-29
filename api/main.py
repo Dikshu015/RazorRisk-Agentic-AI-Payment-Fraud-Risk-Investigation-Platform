@@ -1,5 +1,7 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -47,6 +49,110 @@ setup_tracing()
 
 
 # ---------------------------------------------------------------------------
+# Startup readiness state
+# ---------------------------------------------------------------------------
+#
+# The heavy startup work below (DB connect/init, dataset seeding, in-memory
+# graph build) used to run inline inside lifespan(), which FastAPI/uvicorn
+# run to completion BEFORE the server binds its port and starts accepting
+# connections. If any step blocked — e.g. an unreachable DATABASE_URL — the
+# whole process never finished starting, so nothing (not even /health)
+# responded, and PaaS platforms killed it as "still starting" with no
+# useful signal.
+#
+# lifespan() now fires this work off as a background task and returns
+# immediately, so the port opens right away. Routes that need the DB/graph
+# check _startup_ready (via require_ready below) and return a clean 503
+# instead of a confusing raw exception while warm-up is still running.
+
+_startup_ready = asyncio.Event()
+_startup_error: Optional[str] = None
+
+
+async def _run_startup_work() -> None:
+    """The real startup sequence — now runs in the background, off the
+    critical path of the port coming up."""
+
+    global _startup_error
+
+    try:
+        # ------------------------------------------------------------
+        # 1. Initialize database
+        # ------------------------------------------------------------
+
+        init_db()
+
+        # ------------------------------------------------------------
+        # 2. Seed database if empty
+        # ------------------------------------------------------------
+
+        conn = get_raw_sqlite_connection()
+
+        try:
+            txn_count = conn.execute(
+                "SELECT COUNT(*) FROM transactions"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        if txn_count == 0:
+            logger.info(
+                f"Empty {DATABASE_BACKEND} database detected "
+                "— seeding RazorRisk dataset..."
+            )
+
+            from data.generate_synthetic_data import generate_dataset
+
+            generate_dataset(
+                num_users=1500,
+                num_transactions=12000,
+                seed=42,
+            )
+
+        # ------------------------------------------------------------
+        # 3. Build in-memory transaction graph
+        # ------------------------------------------------------------
+
+        logger.info(
+            "Building in-memory transaction graph "
+            "from current database state..."
+        )
+
+        graph_builder.build_graph()
+
+        # ------------------------------------------------------------
+        # 4. Detect graph communities
+        # ------------------------------------------------------------
+
+        graph_builder.detect_communities()
+
+        logger.info(
+            f"Graph ready: "
+            f"{graph_builder.G.number_of_nodes()} nodes, "
+            f"{graph_builder.G.number_of_edges()} edges."
+        )
+
+        _startup_ready.set()
+
+        logger.info(
+            "RazorRisk background startup complete — "
+            "DB-backed endpoints are now live."
+        )
+
+    except Exception as exc:
+        # Deliberately not re-raised: the port stays open and /health
+        # reports the failure with a real message instead of the process
+        # hanging silently (the old failure mode) or dying with logs that
+        # never got flushed.
+        _startup_error = str(exc)
+        logger.error(
+            "RazorRisk background startup failed: %s",
+            exc,
+            exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Application lifespan
 # ---------------------------------------------------------------------------
 
@@ -56,80 +162,18 @@ async def lifespan(app: FastAPI):
     Application startup and shutdown lifecycle.
 
     Startup:
-        1. Initialize database
-        2. Seed synthetic dataset if database is empty
-        3. Build in-memory transaction/entity graph
-        4. Detect graph communities
+        Kicks off DB init / seeding / graph build as a background task
+        and returns immediately — the port opens without waiting on any
+        of it. See _run_startup_work() and _startup_ready above.
 
     Shutdown:
-        1. Close Redis connection/resources
+        1. Cancel any still-running background startup work
+        2. Close Redis connection/resources
     """
-
-    # ============================================================
-    # STARTUP
-    # ============================================================
 
     logger.info("Starting RazorRisk FastAPI Backend Engine...")
 
-    # ------------------------------------------------------------
-    # 1. Initialize database
-    # ------------------------------------------------------------
-
-    init_db()
-
-    # ------------------------------------------------------------
-    # 2. Seed database if empty
-    # ------------------------------------------------------------
-
-    conn = get_raw_sqlite_connection()
-
-    try:
-        txn_count = conn.execute(
-            "SELECT COUNT(*) FROM transactions"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-
-    if txn_count == 0:
-        logger.info(
-            f"Empty {DATABASE_BACKEND} database detected "
-            "— seeding RazorRisk dataset..."
-        )
-
-        from data.generate_synthetic_data import generate_dataset
-
-        generate_dataset(
-            num_users=1500,
-            num_transactions=12000,
-            seed=42,
-        )
-
-    # ------------------------------------------------------------
-    # 3. Build in-memory transaction graph
-    # ------------------------------------------------------------
-
-    logger.info(
-        "Building in-memory transaction graph "
-        "from current database state..."
-    )
-
-    graph_builder.build_graph()
-
-    # ------------------------------------------------------------
-    # 4. Detect graph communities
-    # ------------------------------------------------------------
-
-    graph_builder.detect_communities()
-
-    logger.info(
-        f"Graph ready: "
-        f"{graph_builder.G.number_of_nodes()} nodes, "
-        f"{graph_builder.G.number_of_edges()} edges."
-    )
-
-    # ------------------------------------------------------------
-    # Application is now ready to serve requests
-    # ------------------------------------------------------------
+    startup_task = asyncio.create_task(_run_startup_work())
 
     yield
 
@@ -138,6 +182,8 @@ async def lifespan(app: FastAPI):
     # ============================================================
 
     logger.info("Shutting down RazorRisk FastAPI Backend Engine...")
+
+    startup_task.cancel()
 
     await close_redis()
 
@@ -279,6 +325,46 @@ async def api_key_gate(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
+# Readiness gate
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def readiness_gate(request: Request, call_next):
+    """
+    DB/graph-backed routes (/api/v1/*) return a clean 503 while the
+    background startup work (see _run_startup_work) is still running,
+    instead of a raw exception hitting an uninitialized table/graph.
+
+    /health, /metrics, /dashboard, and / are intentionally exempt so they
+    stay usable — and truthful about current status — during warm-up.
+    """
+
+    if request.url.path.startswith("/api/v1/") and not _startup_ready.is_set():
+        if _startup_error:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "RazorRisk failed to start up.",
+                    "error": _startup_error,
+                },
+            )
+
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "5"},
+            content={
+                "detail": (
+                    "RazorRisk is still warming up "
+                    "(database init / dataset seeding / graph build "
+                    "in progress). Check /health, retry shortly."
+                )
+            },
+        )
+
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
 
@@ -353,19 +439,40 @@ def metrics():
 async def health_check():
     redis_ok = await redis_health()
 
-    return {
-        "status": "HEALTHY" if redis_ok else "DEGRADED",
+    if _startup_error:
+        startup_state = "ERROR"
+    elif _startup_ready.is_set():
+        startup_state = "READY"
+    else:
+        startup_state = "STARTING"
+
+    overall = "HEALTHY" if (redis_ok and startup_state == "READY") else (
+        "ERROR" if startup_state == "ERROR" else "DEGRADED"
+    )
+
+    payload = {
+        "status": overall,
         "system": "RazorRisk AI Engine",
         "version": "1.0.0",
         "dependencies": {
             "redis": "UP" if redis_ok else "DOWN",
             "database": DATABASE_BACKEND.upper(),
         },
+        # DB init / dataset seeding / graph build run in the background
+        # (see _run_startup_work) so the port and this endpoint respond
+        # immediately even before they finish. "STARTING" here is expected
+        # and normal for the first several seconds/minutes after boot.
+        "startup": startup_state,
         "distributed_mode": (
             redis_ok
             and DATABASE_BACKEND == "postgresql"
         ),
     }
+
+    if _startup_error:
+        payload["startup_error"] = _startup_error
+
+    return payload
 
 
 # ---------------------------------------------------------------------------
