@@ -5,7 +5,8 @@ Two responsibilities, kept in one file because they share the same
 contract (tabular_score, gnn_score, shared_device_norm, shared_ip_norm ->
 combined probability):
 
-1. train_stacker(): offline. Combines the tabular model's, the GNN's, AND
+1. train_stacker(): offline. Combines the synthetic-domain tabular model's,
+the synthetic-domain GNN's, AND
    live graph-evidence signals (shared device/IP account counts, normalized)
    via a small logistic regression stacker — LEARNED combination weights,
    not an arbitrary hand-picked average or a rule bolted onto the output.
@@ -64,7 +65,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-from ml.common import classification_report_dict
+from ml.common import classification_report_dict, load_tuned_hyperparameters
 from ml.train_tabular_model import train_tabular_model, predict_tabular_fraud_prob, MERCHANT_RATES_PATH
 from ml.train_gnn import train_gnn, GraphSAGEInference, GNN_WEIGHTS_PATH
 from ml.risk_graph import build_user_graph, detect_communities, fetch_node_features, build_adjacency
@@ -220,7 +221,26 @@ def train_stacker():
         coef = np.array([2.0, 2.0, 2.0, 2.0])
         intercept = np.array([-2.0])
     else:
-        stacker = LogisticRegression(class_weight="balanced")
+        # The base models use their own imbalance controls (XGBoost
+        # scale_pos_weight and GNN positive-class loss weighting). The stacker
+        # has a separate objective, so it explicitly reweights the minority
+        # class with sklearn's inverse-frequency balanced weighting. This is
+        # critical here because the stacker sees already-compressed model
+        # probabilities and would otherwise optimize mostly for the negative
+        # class.
+        class_counts = np.bincount(y_train.astype(int), minlength=2)
+        logger.info(
+            f"Balanced stacker training: negatives={int(class_counts[0])}, "
+            f"positives={int(class_counts[1])}, "
+            f"positive_weight={len(y_train) / max(2 * class_counts[1], 1):.2f}"
+        )
+        # Bug #28: read the CV-search result instead of the hardcoded
+        # literal — see ml/common.py::load_tuned_hyperparameters(). Falls
+        # back to the same C=0.05/balanced default if the search hasn't
+        # been run yet.
+        tuned = load_tuned_hyperparameters()
+        stacker_params = tuned.get("stacker", {}).get("best_params", {"C": 0.05, "class_weight": "balanced"})
+        stacker = LogisticRegression(max_iter=1000, random_state=42, **stacker_params)
         stacker.fit(X_train, y_train)
         coef = stacker.coef_[0]
         intercept = stacker.intercept_
@@ -305,7 +325,43 @@ def live_gnn_score_and_evidence(user_id: str):
         G, community_size, user_ids, scores = _GraphSnapshotCache.get(conn)
 
         if user_id not in user_ids:
-            return 0.0, {"graph_degree": 0, "community_size": 1, "shared_device_accounts": 1, "shared_ip_accounts": 1}
+            # Bug #30: a user with NO transaction history yet (this is their
+            # first-ever transaction, so they can't be in a graph snapshot
+            # built from persisted transactions) used to return a hard 0.0
+            # here. That 0.0 was then fed into the learned stacker as if the
+            # GNN had confidently voted "not fraud" — but the GNN never
+            # looked at this user at all; there was nothing to look at. Two
+            # concrete failures followed: (1) calculate_composite_risk_score
+            # below combines this with the stacker's fitted GNN coefficient
+            # (~2.26), so the calibrated probability for a first-time user
+            # was structurally capped around ~0.70 (sigmoid(coef[0]*1.0 +
+            # coef[2]*0 - intercept-ish), no matter how confident the
+            # tabular signal was — well under the 0.95 AUTO_BLOCK_THRESHOLD,
+            # so a brand-new identity could never be auto-blocked, only ever
+            # routed to human review; (2) ml/decision_policy.py's
+            # MODEL_DISAGREEMENT check (abs(tabular - gnn) >= 0.45) fired on
+            # nearly every first-time transaction with any real tabular
+            # signal, since gnn was artificially pinned at 0 — flagging
+            # "disagreement" that was actually just absent graph data, not
+            # two models reaching different conclusions. Reproduced directly
+            # against a never-before-seen synthetic identity (not one of the
+            # golden-matrix users, which all have persisted history and so
+            # never hit this branch — this is why none of the existing 69
+            # tests caught it). Golden-matrix G10's own stated intent is
+            # "tabular dominates" for structurally isolated users; this
+            # fallback now honors that literally instead of only in tier,
+            # by NOT asserting a confident graph opinion that doesn't exist.
+            # graph_evidence_available=False downstream (a) makes
+            # calculate_composite_risk_score skip the 4-input stacker for
+            # this request and use the tabular probability directly as the
+            # calibrated score, and (b) makes decision_policy.py skip
+            # MODEL_DISAGREEMENT, since there's no second opinion to
+            # disagree with.
+            return 0.0, {
+                "graph_degree": 0, "community_size": 1,
+                "shared_device_accounts": 1, "shared_ip_accounts": 1,
+                "graph_evidence_available": False,
+            }
 
         idx = user_ids.index(user_id)
         gnn_score = float(scores[idx])
@@ -327,6 +383,7 @@ def live_gnn_score_and_evidence(user_id: str):
         return gnn_score, {
             "graph_degree": degree, "community_size": comm_size,
             "shared_device_accounts": shared_device, "shared_ip_accounts": shared_ip,
+            "graph_evidence_available": True,
         }
     finally:
         conn.close()
@@ -349,6 +406,25 @@ def live_tabular_score(txn_payload: dict, velocity_1h: int) -> tuple[float, dict
         user_id = txn_payload["user_id"]
         amount = float(txn_payload.get("amount", 0.0))
         cur = conn.cursor()
+
+        # Bug #29: hour_of_day/day_of_week/is_night used to call
+        # datetime.now() directly — correct for a transaction genuinely
+        # happening right now (the real live-API case), but wrong for
+        # re-scoring an already-occurred transaction (tests, investigation
+        # replay, evaluation), since it silently swapped in whatever the
+        # real wall-clock happened to be at call time instead of when the
+        # transaction actually occurred. Training computes these from the
+        # transaction's own stored `timestamp` column
+        # (ml/train_tabular_model.py, `strftime('%H', t.timestamp)`) — this
+        # resolves the same way at inference: honor an explicit
+        # `timestamp` in the payload if present, otherwise default to
+        # real "now" (unchanged behavior for the live API, which has no
+        # other notion of "when" a brand-new transaction occurred).
+        ref_time = txn_payload.get("timestamp")
+        if isinstance(ref_time, str):
+            ref_time = _dt.datetime.fromisoformat(ref_time)
+        elif not isinstance(ref_time, _dt.datetime):
+            ref_time = _dt.datetime.now()
 
         # Bounded to PRIOR_AMOUNT_WINDOW_DAYS (default 90) — matches
         # ml/train_tabular_model.py's FEATURE_SQL exactly, so amount_zscore_
@@ -399,17 +475,33 @@ def live_tabular_score(txn_payload: dict, velocity_1h: int) -> tuple[float, dict
             "SELECT 1 FROM transactions WHERE user_id = ? AND merchant_id = ? AND timestamp > datetime('now', '-1 hours') LIMIT 1",
             (user_id, incoming_merchant)
         )
-        distinct_merchants_1h = prior_distinct_merchants if cur.fetchone() else prior_distinct_merchants + 1
+        merchant_seen = bool(cur.fetchone())
+        distinct_merchants_1h = prior_distinct_merchants + (0 if merchant_seen else 1)
+
+        # Count previous transactions for the incoming merchant in the same
+        # one-hour window. This is intentionally separate from total velocity
+        # so card-testing / repeated authorization attempts become a visible
+        # tabular pattern even when total velocity is only moderate.
+        cur.execute("""
+            SELECT COUNT(*) FROM transactions
+            WHERE user_id = ? AND merchant_id = ?
+              AND timestamp > datetime('now', '-1 hours')
+        """, (user_id, incoming_merchant))
+        same_merchant_1h = int(cur.fetchone()[0] or 0) + 1
 
         feature_row = {
             "amount_log": float(np.log1p(amount)),
-            "hour_of_day": _dt.datetime.now().hour,
-            "day_of_week": _dt.datetime.now().weekday(),
+            "hour_of_day": ref_time.hour,
+            "day_of_week": ref_time.weekday(),
             "velocity_1h": velocity_1h,
             "amount_zscore_prior": amount_zscore_prior,
             "merchant_fraud_rate": _merchant_fraud_rate(txn_payload.get("merchant_id", "")),
             "distinct_devices_7d": distinct_devices_7d,
             "distinct_merchants_1h": distinct_merchants_1h,
+            "same_merchant_1h": same_merchant_1h,
+            "amount_to_prior_avg": float(np.clip(amount / float(prior_avg), 0, 100)) if prior_avg else 1.0,
+            "is_night": int(ref_time.hour in {0,1,2,3,4,5}),
+            "is_round_amount": int(amount >= 5000 and abs(amount % 500) < 1e-6),
         }
         return predict_tabular_fraud_prob(feature_row), amount_zscore_prior
     finally:
@@ -456,15 +548,34 @@ def calculate_composite_risk_score(txn_payload: dict) -> dict:
     # overlay) — same normalization used at training time.
     shared_device_norm = _normalize_shared_signal(graph_evidence["shared_device_accounts"])
     shared_ip_norm = _normalize_shared_signal(graph_evidence["shared_ip_accounts"])
+    graph_evidence_available = graph_evidence.get("graph_evidence_available", True)
 
     _LiveModels.ensure_loaded()
     coef = _LiveModels.coef
-    z = float(
-        coef[0] * tabular_prob + coef[1] * gnn_prob
-        + coef[2] * shared_device_norm + coef[3] * shared_ip_norm
-        + _LiveModels.intercept
-    )
-    calibrated_prob = 1 / (1 + np.exp(-z))
+
+    if graph_evidence_available:
+        z = float(
+            coef[0] * tabular_prob + coef[1] * gnn_prob
+            + coef[2] * shared_device_norm + coef[3] * shared_ip_norm
+            + _LiveModels.intercept
+        )
+        calibrated_prob = 1 / (1 + np.exp(-z))
+    else:
+        # Bug #30 fix: the stacker's coefficients were fit assuming a real
+        # GNN opinion is always present. Running gnn_prob=0.0 through it
+        # anyway silently treats "no data yet" as "the GNN actively cleared
+        # this transaction," which both caps the achievable calibrated
+        # score far below AUTO_BLOCK_THRESHOLD and — via decision_policy.py
+        # — manufactures a false MODEL_DISAGREEMENT on almost every
+        # first-time transaction with real tabular signal. For a
+        # first-ever transaction from this identity there is no graph
+        # evidence to combine, so the calibrated probability is the
+        # tabular model's own probability, unmodified — the same "tabular
+        # dominates" principle the golden matrix's G10 case already
+        # documents as this project's intended behavior for
+        # structurally-isolated users, now honored for genuinely unseen
+        # ones too instead of only in the final tier.
+        calibrated_prob = tabular_prob
 
     velocity_mult = 1.0
     effective_velocity_1h = velocity_1h
@@ -517,6 +628,7 @@ def calculate_composite_risk_score(txn_payload: dict) -> dict:
             "shared_ip_accounts": graph_evidence["shared_ip_accounts"],
             "community_size": graph_evidence["community_size"],
             "graph_degree": graph_evidence["graph_degree"],
+            "evidence_available": graph_evidence_available,
         },
     }
     logger.info(
