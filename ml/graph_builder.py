@@ -2,7 +2,7 @@ import threading
 import networkx as nx
 import pandas as pd
 import numpy as np
-from db.database import get_raw_sqlite_connection
+from db.database import get_raw_sqlite_connection, read_sql_query
 from utils.logger import get_logger
 
 logger = get_logger("graph_builder")
@@ -34,7 +34,7 @@ class TransactionGraphBuilder:
             SELECT t.transaction_id, t.user_id, t.device_id, t.ip_address, t.merchant_id, t.amount, t.is_fraud_ground_truth
             FROM transactions t
         """
-        df = pd.read_sql_query(query, conn)
+        df = read_sql_query(query)
         conn.close()
 
         new_G = nx.Graph()
