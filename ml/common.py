@@ -5,10 +5,39 @@ the exact same held-out users — required for the risk_aggregator's stacker
 to combine their scores on a fair, leak-free basis, and ported directly from
 the more rigorous train/test discipline in the merged reference project.
 """
+import json
+import os
+
 import numpy as np
 
 RNG_SEED = 42
 TRAIN_FRAC = 0.7
+
+HYPERPARAMETERS_PATH = os.path.join(os.path.dirname(__file__), "models", "hyperparameters.json")
+
+
+def load_tuned_hyperparameters() -> dict:
+    """Reads ml/models/hyperparameters.json (written by
+    ml/hyperparameter_search.py) if it exists, else returns {}.
+
+    Bug #28: this file used to be written by the search script and then
+    never read by anything — train_tabular_model(), train_gnn(), and
+    train_stacker() each hardcoded their own literal default matching
+    whatever the search happened to find *at the time someone last ran it
+    and copied the numbers in by hand*. Re-running the search with a wider
+    grid or new data would silently have no effect on the next `train_*()`
+    call unless someone noticed and manually edited three files. This is
+    the one place all three now read from, with the same hardcoded values
+    kept as fallback defaults so training still works with no search
+    artifact present (e.g. a fresh clone before anyone has run the search).
+    """
+    if not os.path.exists(HYPERPARAMETERS_PATH):
+        return {}
+    try:
+        with open(HYPERPARAMETERS_PATH) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def user_level_split(user_ids, y, seed=RNG_SEED, train_frac=TRAIN_FRAC):
