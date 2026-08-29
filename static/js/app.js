@@ -26,6 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAgentStatus();
     refreshLogStream();
     initVelocitySourceToggle();
+    initInfoBubbles();
 
     // Form submit listener
     const form = document.getElementById('scoring-form');
@@ -77,6 +78,32 @@ function initVelocitySourceToggle() {
     if (!toggle) return;
     toggle.addEventListener('change', updateVelocitySourceUI);
     updateVelocitySourceUI();
+}
+
+// Info bubbles (e.g. the velocity-source explainer) rely on CSS :hover for
+// desktop, which doesn't exist on touch devices — this adds tap-to-toggle
+// support so the same bubble works on mobile, plus tap-outside-to-close so
+// it doesn't just stay pinned open.
+function initInfoBubbles() {
+    const triggers = document.querySelectorAll('.info-trigger');
+    triggers.forEach((trigger) => {
+        const bubble = trigger.nextElementSibling;
+        if (!bubble || !bubble.classList.contains('info-bubble')) return;
+        trigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = bubble.classList.contains('is-open');
+            document.querySelectorAll('.info-bubble.is-open').forEach((b) => b.classList.remove('is-open'));
+            document.querySelectorAll('.info-trigger.is-active').forEach((t) => t.classList.remove('is-active'));
+            if (!isOpen) {
+                bubble.classList.add('is-open');
+                trigger.classList.add('is-active');
+            }
+        });
+    });
+    document.addEventListener('click', () => {
+        document.querySelectorAll('.info-bubble.is-open').forEach((b) => b.classList.remove('is-open'));
+        document.querySelectorAll('.info-trigger.is-active').forEach((t) => t.classList.remove('is-active'));
+    });
 }
 
 // Preset Scenario Handlers
@@ -197,16 +224,32 @@ function handleTransactionScore(e) {
         if (data.needs_investigation) {
             document.getElementById('agent-report-container').innerHTML = `
                 <div class="placeholder-msg">Running agent investigation…</div>`;
-            fetch(`${API_BASE}/api/v1/investigations/run/${data.transaction_id}`, { method: 'POST' })
-                .then(res => {
-                    if (!res.ok) throw new Error(`Investigation request failed (HTTP ${res.status})`);
-                    return res.json();
+            // Production path: enqueue into the shared Redis Streams queue so
+            // the dashboard never blocks on ML/LLM investigation work.
+            fetch(`${API_BASE}/api/v1/investigations/enqueue/${encodeURIComponent(data.transaction_id)}`, { method: 'POST' })
+                .then(res => res.json().then(body => ({ ok: res.ok, status: res.status, body })))
+                .then(({ ok, status, body }) => {
+                    if (!ok) throw new Error(body.detail || `Investigation queue request failed (HTTP ${status})`);
+                    // Local/no-Redis deployments (REDIS_REQUIRED=false) may return an
+                    // already-terminal result inline instead of a job to poll for --
+                    // see "degraded_mode" in api/routes_agent.py's enqueue fallback.
+                    if (body.status === 'completed' || body.status === 'failed') return body;
+                    return pollInvestigationJob(body.job_id);
                 })
-                .then(investigationRes => renderAgentReport(investigationRes))
+                .then(investigationRes => {
+                    if (investigationRes.status === 'completed' && investigationRes.result) {
+                        renderAgentReport(investigationRes.result);
+                        return;
+                    }
+                    if (investigationRes.status === 'failed') {
+                        throw new Error(investigationRes.error || 'Investigation worker failed.');
+                    }
+                    throw new Error(`Investigation ended in unexpected state: ${investigationRes.status}`);
+                })
                 .catch(err => {
                     console.error("Investigation error:", err);
                     document.getElementById('agent-report-container').innerHTML = `
-                        <div class="placeholder-msg">Couldn't complete the investigation: ${err.message}</div>`;
+                        <div class="placeholder-msg">Couldn't complete the investigation: ${escapeHtml(err.message)}</div>`;
                 });
         } else {
             document.getElementById('agent-report-container').innerHTML = `
@@ -220,6 +263,18 @@ function handleTransactionScore(e) {
         btn.disabled = false;
         alert('Could not evaluate this transaction: ' + err.message);
     });
+}
+
+async function pollInvestigationJob(jobId, attempts = 0) {
+    const maxAttempts = 120;
+    const delayMs = 1000;
+    const res = await fetch(`${API_BASE}/api/v1/investigations/jobs/${encodeURIComponent(jobId)}`);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || `Investigation status request failed (HTTP ${res.status})`);
+    if (['completed', 'failed'].includes(body.status)) return body;
+    if (attempts >= maxAttempts) throw new Error('Investigation status polling timed out in the dashboard.');
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    return pollInvestigationJob(jobId, attempts + 1);
 }
 
 // Turns a FastAPI/Pydantic error body into one readable line instead of
@@ -351,18 +406,16 @@ function setAgentMode(mode) {
         });
 }
 
-// Data Pipeline Controls (synthetic reseed / real Kaggle ingest + retrain)
+// Data Pipeline Controls (synthetic reseed + retrain)
 function runDataPipeline(mode) {
     const statusEl = document.getElementById('pipeline-status');
     const synthBtn = document.getElementById('btn-seed-synthetic');
-    const realBtn = document.getElementById('btn-seed-real');
-    const endpoint = mode === 'real' ? `${API_BASE}/api/v1/admin/pipeline/real` : `${API_BASE}/api/v1/admin/pipeline/synthetic`;
-    const label = mode === 'real' ? 'Downloading real Kaggle dataset & retraining models…' : 'Regenerating synthetic data & retraining models…';
+    const endpoint = `${API_BASE}/api/v1/admin/pipeline/synthetic`;
+    const label = 'Regenerating synthetic data & retraining models…';
 
     statusEl.textContent = label;
     statusEl.className = 'pipeline-status status-loading';
     synthBtn.disabled = true;
-    realBtn.disabled = true;
 
     fetch(endpoint, { method: 'POST' })
         .then(async (res) => {

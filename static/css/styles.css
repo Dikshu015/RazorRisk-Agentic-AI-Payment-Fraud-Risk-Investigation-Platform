@@ -773,5 +773,40 @@ code {
 /* Server-computed velocity control */
 .velocity-control { display:flex; flex-direction:column; gap:6px; }
 .switch-label { display:flex; align-items:center; gap:9px; cursor:pointer; font-weight:500; }
-.switch-label input { width:18px; height:18px; accent-color:var(--accent, #6d5dfc); }
-.field-help { color:var(--muted, #7d8493); line-height:1.35; }
+.switch-label input { width:18px; height:18px; accent-color:var(--signal); }
+
+/* Info bubble: a small "i" trigger next to a label that reveals an
+   explanatory tooltip on hover/focus/tap, instead of a permanent block of
+   small gray text competing with the actual form controls for space. */
+.form-group label { display:flex; align-items:center; gap:6px; position:relative; }
+.info-trigger {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:16px; height:16px; border-radius:50%;
+    border:1px solid var(--border-hairline); background:var(--bg-inset);
+    color:var(--ink-muted); font-family:var(--font-mono); font-size:10px; font-weight:600;
+    line-height:1; cursor:pointer; padding:0; flex-shrink:0;
+    transition:border-color .15s, color .15s;
+}
+.info-trigger:hover, .info-trigger:focus-visible, .info-trigger.is-active {
+    border-color:var(--signal); color:var(--signal); outline:none;
+}
+.info-bubble {
+    position:absolute; z-index:20; top:calc(100% + 10px); left:0;
+    width:260px; max-width:80vw; padding:10px 12px;
+    background:var(--bg-panel); border:1px solid var(--border-hairline);
+    border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.35);
+    color:var(--ink-muted); font-size:12px; line-height:1.45;
+    opacity:0; pointer-events:none; transform:translateY(-4px);
+    transition:opacity .12s ease, transform .12s ease;
+}
+.info-bubble strong { color:var(--ink-primary); font-weight:600; }
+.info-bubble-arrow {
+    position:absolute; top:-5px; left:12px; width:9px; height:9px;
+    background:var(--bg-panel); border-left:1px solid var(--border-hairline);
+    border-top:1px solid var(--border-hairline); transform:rotate(45deg);
+}
+.info-trigger:hover + .info-bubble,
+.info-trigger:focus-visible + .info-bubble,
+.info-bubble.is-open {
+    opacity:1; pointer-events:auto; transform:translateY(0);
+}

@@ -60,7 +60,7 @@
                 <div class="health-indicator status-online"></div>
                 <div class="health-text">
                     <div class="health-title">System Status</div>
-                    <div class="health-sub">SQLite + GraphSAGE Active</div>
+                    <div class="health-sub">PostgreSQL + GraphSAGE Active</div>
                 </div>
             </div>
         </aside>
@@ -76,7 +76,6 @@
                 <div class="data-pipeline-row">
                     <span class="pipeline-label">Data source</span>
                     <button class="btn-preset" id="btn-seed-synthetic" onclick="runDataPipeline('synthetic')">Reseed synthetic data</button>
-                    <button class="btn-preset btn-accent" id="btn-seed-real" onclick="runDataPipeline('real')">Load real Kaggle dataset</button>
                     <span id="pipeline-status" class="pipeline-status"></span>
                 </div>
                 <div class="stats-row">
@@ -128,7 +127,16 @@
                                 <input type="number" id="amount" value="88000" step="0.01" required>
                             </div>
                             <div class="form-group">
-                                <label>Hourly velocity source</label>
+                                <label>
+                                    Hourly velocity source
+                                    <button type="button" class="info-trigger" id="velocity-info-trigger" aria-describedby="velocity-info-bubble" aria-label="What does this control?">i</button>
+                                    <div class="info-bubble" id="velocity-info-bubble" role="tooltip">
+                                        <strong>OFF</strong> — backend calculates the trailing 1-hour count.
+                                        <strong>ON</strong> — trust the client-provided value, for simulation/testing.
+                                        The selected source is recorded in the audit trail.
+                                        <span class="info-bubble-arrow"></span>
+                                    </div>
+                                </label>
                                 <div class="velocity-control">
                                     <label class="switch-label">
                                         <input type="checkbox" id="velocity_enabled">
@@ -138,7 +146,6 @@
                                         <label for="velocity_1h">Client velocity (txns/hour)</label>
                                         <input type="number" id="velocity_1h" min="0" step="1" value="1">
                                     </div>
-                                    <small class="field-help">OFF: backend calculates the trailing 1-hour count. ON: trust the client-provided value for simulation/testing. The selected source is recorded in the audit trail.</small>
                                 </div>
                             </div>
                             <div class="form-group">
