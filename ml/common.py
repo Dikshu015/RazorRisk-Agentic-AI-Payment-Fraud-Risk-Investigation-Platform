@@ -42,28 +42,115 @@ def load_tuned_hyperparameters() -> dict:
 
 def user_level_split(user_ids, y, seed=RNG_SEED, train_frac=TRAIN_FRAC):
     """
-    Stratified split by USER (not by transaction) — a user's transactions
-    must all land on the same side of the split, otherwise the tabular
-    model could see a fraud-ring member's behavior in training and be
-    evaluated on the same person's transactions in test, which isn't a
-    real held-out evaluation.
+    Stratified split by USER (not by transaction).
 
-    Returns (train_mask, test_mask) boolean arrays aligned to user_ids/y.
+    All transactions belonging to the same user are guaranteed to remain
+    entirely in either train or test.
+
+    Users are stratified according to whether they have at least one
+    fraud transaction.
+
+    Returns:
+        (train_mask, test_mask)
+
+    Both are boolean arrays aligned to user_ids/y.
+
+    NOTE:
+        This is a user-level random split. It does NOT perform a temporal
+        split. A separate temporal holdout should be added if production-
+        style temporal validation is required.
     """
+    user_ids = np.asarray(user_ids)
     y = np.asarray(y)
+
+    if len(user_ids) != len(y):
+        raise ValueError(
+            f"user_ids and y must have the same length: "
+            f"{len(user_ids)} != {len(y)}"
+        )
+
+    if len(user_ids) == 0:
+        raise ValueError("Cannot split an empty dataset.")
+
+    if not np.isin(y, [0, 1]).all():
+        raise ValueError("y must contain only 0 and 1.")
+
+    # ---------------------------------------------------------
+    # Build one label per USER.
+    #
+    # A user is considered fraud-associated if ANY of their
+    # transactions is fraudulent.
+    # ---------------------------------------------------------
+    unique_users, inverse = np.unique(
+        user_ids,
+        return_inverse=True,
+    )
+
+    user_labels = np.zeros(len(unique_users), dtype=int)
+
+    # If any transaction belonging to a user is fraud,
+    # that user receives label 1.
+    np.maximum.at(
+        user_labels,
+        inverse,
+        y.astype(int),
+    )
+
+    # ---------------------------------------------------------
+    # Stratified USER split
+    # ---------------------------------------------------------
     rng = np.random.default_rng(seed)
-    pos_idx = np.where(y == 1)[0]
-    neg_idx = np.where(y == 0)[0]
-    rng.shuffle(pos_idx)
-    rng.shuffle(neg_idx)
 
-    n_pos_train = max(1, int(len(pos_idx) * train_frac)) if len(pos_idx) else 0
-    n_neg_train = int(len(neg_idx) * train_frac)
-    train_idx = np.concatenate([pos_idx[:n_pos_train], neg_idx[:n_neg_train]])
+    fraud_users = np.where(user_labels == 1)[0]
+    normal_users = np.where(user_labels == 0)[0]
 
-    train_mask = np.zeros(len(y), dtype=bool)
-    train_mask[train_idx] = True
-    test_mask = ~train_mask
+    rng.shuffle(fraud_users)
+    rng.shuffle(normal_users)
+
+    # Keep approximately the same fraction of fraud-associated
+    # and normal users in training.
+    n_fraud_train = (
+        max(1, int(len(fraud_users) * train_frac))
+        if len(fraud_users)
+        else 0
+    )
+
+    n_normal_train = int(len(normal_users) * train_frac)
+
+    train_user_idx = np.concatenate([
+        fraud_users[:n_fraud_train],
+        normal_users[:n_normal_train],
+    ])
+
+    train_user_mask = np.zeros(
+        len(unique_users),
+        dtype=bool,
+    )
+
+    train_user_mask[train_user_idx] = True
+
+    test_user_mask = ~train_user_mask
+
+    # ---------------------------------------------------------
+    # Convert USER masks → TRANSACTION masks
+    # ---------------------------------------------------------
+    train_mask = train_user_mask[inverse]
+    test_mask = test_user_mask[inverse]
+
+    # ---------------------------------------------------------
+    # Safety checks
+    # ---------------------------------------------------------
+    assert np.all(train_mask | test_mask)
+    assert not np.any(train_mask & test_mask)
+
+    train_users = set(user_ids[train_mask])
+    test_users = set(user_ids[test_mask])
+
+    assert train_users.isdisjoint(test_users), (
+        "User leakage detected: train and test contain "
+        "overlapping users."
+    )
+
     return train_mask, test_mask
 
 

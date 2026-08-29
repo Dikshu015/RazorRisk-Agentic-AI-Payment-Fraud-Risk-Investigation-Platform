@@ -1,23 +1,24 @@
-%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 50}}}%%
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 48}}}%%
 flowchart TB
-    TX[Incoming transaction] --> API[FastAPI score endpoint]
-    API --> TF[Transaction feature builder]
-    API --> UG[Current User-only graph]
-    TF --> X[XGBoost]
-    UG --> G[GraphSAGE GNN]
-    X --> XP[XGB probability]
-    G --> GP[GNN probability]
-    XP --> ST[Learned stacker]
-    GP --> ST
-    ST --> R[Combined model probability]
-    API --> V[Velocity] 
-    API --> S[Security signals]
-    R --> P[Risk policy + guardrails]
-    V --> P
-    S --> P
-    P --> H{HITL required?}
-    H -->|Yes| Q[Human review queue]
-    H -->|No| A[Automatic action]
-    Q --> I[Investigation / reviewer]
-    A --> AU[Audit]
-    I --> AU
+    TX[Frontend transaction] --> API[FastAPI /transactions/score]
+    API --> TABF[Transaction feature builder]
+    API --> GRAPHF[Current User-only graph]
+    TABF --> XGB["XGBoost<br/><b>~17ms</b> p50"]
+    GRAPHF --> GNN["GraphSAGE<br/><b>~0.2ms</b> p50 (cached snapshot)"]
+    XGB --> XS[XGBoost probability]
+    GNN --> GS[GNN probability]
+    XS --> STACK["Learned stacker<br/><b>~1µs</b> (logistic blend)"]
+    GS --> STACK
+    STACK --> CAL[Combined model probability]
+    API --> VEL["Velocity<br/><b>~0.1ms</b> DB query"]
+    API --> SEC[VPN / proxy / security signals]
+    CAL --> POL[Risk policy + guardrails]
+    VEL --> POL
+    SEC --> POL
+    POL --> DEC{Decision / HITL policy}
+    DEC -->|automatic| OUT[APPROVE / MONITOR / HOLD / BLOCK]
+    DEC -->|review required| HITL[HITL queue]
+    HITL --> REV[Human reviewer]
+    OUT --> AUD[Audit trail]
+    REV --> AUD
+    

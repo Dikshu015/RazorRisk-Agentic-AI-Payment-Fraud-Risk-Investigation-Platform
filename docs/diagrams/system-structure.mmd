@@ -6,7 +6,7 @@ flowchart TB
     end
 
     subgraph State[State and Data]
-        DB[(SQLite / transaction state)]
+        DB[(PostgreSQL / SQLite -- transaction state)]
         GRAPH[(User-only risk graph)]
         AUDIT[(Audit logs)]
     end
@@ -15,13 +15,13 @@ flowchart TB
         FE[Feature engineering]
         TAB[Tabular XGBoost]
         GNN[GraphSAGE]
-        STACK[Learned logistic stacker]
-        POLICY[Risk aggregation + policy<br/>incl. confidence auto-block]
-        GUARD[Security guardrails]
+        STACK[Learned stacker]
         VEL[Velocity service]
+        GUARD[Security guardrails]
+        POLICY[Risk aggregation + policy<br/>incl. confidence auto-block]
     end
 
-    subgraph Investigation[Investigation]
+    subgraph Investigation[Investigation and Resolution]
         EVID[Deterministic evidence tools]
         LLM[Optional LLM investigation]
         HITL[Human review queue]
@@ -30,12 +30,12 @@ flowchart TB
     UI <--> API
     API --> FE
     API --> DB
-    DB --> VEL
     DB --> FE
+    DB --> VEL
+    DB --> GRAPH
     FE --> TAB
     FE --> GNN
     GRAPH --> GNN
-    FE --> VEL
     TAB --> STACK
     GNN --> STACK
     STACK --> POLICY
@@ -43,10 +43,10 @@ flowchart TB
     GUARD --> POLICY
     POLICY --> API
     POLICY --> EVID
-    EVID --> LLM
     POLICY -->|"only if mandatory-human<br/>reason, or confidence < 0.95"| HITL
+    EVID --> LLM
     LLM --> HITL
     API --> AUDIT
-    HITL --> AUDIT
     EVID --> AUDIT
-    DB --> GRAPH
+    HITL --> AUDIT
+    

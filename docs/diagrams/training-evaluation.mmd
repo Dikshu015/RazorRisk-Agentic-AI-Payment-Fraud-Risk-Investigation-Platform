@@ -1,15 +1,16 @@
-%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 50}}}%%
+%%{init: {'flowchart': {'nodeSpacing': 30, 'rankSpacing': 50}}}%%
 flowchart TB
-    D[Expanded synthetic dataset] --> S[User-level train/test split]
-    S --> T[Transaction-level features]
-    S --> G[Canonical User-only graph]
+    D[Generate expanded synthetic dataset] --> S[User-level train/test split]
+    S --> T[Tabular transaction features]
+    S --> G[User-only device/IP graph]
     S --> Y[Fraud labels]
     T --> X[XGBoost]
     G --> GN[GraphSAGE GNN]
-    X --> XO[Held-out XGB predictions]
+    X --> XO[Held-out XGBoost predictions]
     GN --> GO[Held-out GNN predictions]
     XO --> P[Paired prediction table]
     GO --> P
     Y --> P
-    P --> ST[Class-balanced logistic stacker]
-    ST --> E[Final evaluation]
+    P --> ST[Balanced logistic stacker]
+    ST --> E[Final synthetic benchmark]
+    

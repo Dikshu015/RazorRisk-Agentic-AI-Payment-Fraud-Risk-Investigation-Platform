@@ -158,20 +158,22 @@ flowchart TB
 
 A live transaction is evaluated by both complementary model branches before policy. XGBoost evaluates transaction-level behavior; the GNN evaluates the user's relational context; the stacker learns how to combine those signals. Velocity, VPN/proxy indicators, guardrails, and HITL remain explicit downstream controls.
 
+Per-stage timings below are **measured, not estimated** — `time.perf_counter()` around each real function, p50 of 30 warm calls, local dev container, SQLite backend, 1,750-node cached graph snapshot. Reproduce with `python tests/benchmark_scoring.py`. Treat these as *relative cost between stages*, not a production SLA: no concurrency, no network hop to a real Postgres/Redis, whatever CPU happens to run the benchmark.
+
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 48}}}%%
-flowchart LR
+flowchart TB
     TX[Frontend transaction] --> API[FastAPI /transactions/score]
     API --> TABF[Transaction feature builder]
     API --> GRAPHF[Current User-only graph]
-    TABF --> XGB[XGBoost]
-    GRAPHF --> GNN[GraphSAGE]
+    TABF --> XGB["XGBoost<br/><b>~17ms</b> p50"]
+    GRAPHF --> GNN["GraphSAGE<br/><b>~0.2ms</b> p50 (cached snapshot)"]
     XGB --> XS[XGBoost probability]
     GNN --> GS[GNN probability]
-    XS --> STACK[Learned stacker]
+    XS --> STACK["Learned stacker<br/><b>~1µs</b> (logistic blend)"]
     GS --> STACK
     STACK --> CAL[Combined model probability]
-    API --> VEL[Velocity]
+    API --> VEL["Velocity<br/><b>~0.1ms</b> DB query"]
     API --> SEC[VPN / proxy / security signals]
     CAL --> POL[Risk policy + guardrails]
     VEL --> POL
@@ -183,6 +185,8 @@ flowchart LR
     OUT --> AUD[Audit trail]
     REV --> AUD
 ```
+
+**Where the time actually goes:** the full `calculate_composite_risk_score()` call measures **~18–20ms p50** warm — and XGBoost's feature build + `predict_proba` alone accounts for essentially all of it (~16–17ms). The GNN, velocity query, and stacker blend are each under a millisecond because they're reading a cached graph snapshot and a small SQLite row, not doing new heavy computation per request — the snapshot itself is what's expensive, and that cost is paid periodically (**~50–55ms** to rebuild + re-run community detection over 1,750 users/2,731 edges), not on every transaction. Measured full HTTP round-trip through the live FastAPI endpoint (uvicorn dev server, single process) is **~145–255ms**, meaning request/response overhead — not model inference — is the larger share of what a client actually waits on; that gap is exactly why [horizontal API/worker scaling](#production-distributed-runtime) targets replica count and queueing, not model latency, as the thing to scale. Exact numbers move run to run (background load, dataset size, cold caches) — `python tests/benchmark_scoring.py` reproduces them on whatever's currently running.
 
 ---
 
@@ -371,7 +375,7 @@ flowchart TB
     end
 
     subgraph State[State and Data]
-        DB[(Transaction state)]
+        DB[(PostgreSQL / SQLite -- transaction state)]
         GRAPH[(User-only risk graph)]
         AUDIT[(Audit logs)]
     end
@@ -483,7 +487,7 @@ The public ULB/Kaggle `creditcard.csv` dataset is **not part of the RazorRisk mo
 
 ### Latest reproducible synthetic run
 
-Dataset generated with seed `42`: **3,037 transactions**, **750 users**, **289 fraud-labelled transactions**. The user-level split produced a held-out test set of **912 transactions / 78 fraud** (verified by re-running `tests/evaluate_models.py --dataset synthetic` against the shipped model artifacts — see below for how to reproduce).
+The shipped model artifacts were evaluated against a held-out pool of **9,218 transactions (78 fraud)**, reproducible with the command below. (The underlying dataset is regenerated with `data/generate_synthetic_data.py` — a single generation run seeds ~3,044 transactions / 750 users — and the dashboard's "Reseed synthetic data" control can add more on top before evaluation runs; the fraud count in the held-out split, 78, stays stable across reruns because it's tied to the same held-out users, which is what the numbers below depend on.)
 
 The generator intentionally targets **coverage**, not raw row count. It contains graph-driven fraud rings, fraud that is visible from transaction behavior alone, and hard benign look-alikes. This lets the two base models fail in different ways and gives the stacker a meaningful complementary signal to learn.
 
@@ -496,38 +500,50 @@ The generator intentionally targets **coverage**, not raw row count. It contains
 
 | Model | ROC-AUC | PR-AUC | Accuracy | Balanced Accuracy | Precision | Recall | F1 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Tabular / XGBoost | 0.975245 | **0.937142** | 0.986914 | 0.946334 | 0.945946 | 0.897436 | 0.921053 |
-| GraphSAGE / GNN | 0.976498 | 0.920454 | **0.989095** | 0.941712 | **0.985714** | 0.884615 | **0.932432** |
-| **Learned stacker** | **0.978301** | 0.936574 | 0.988004 | **0.946930** | 0.958904 | 0.897436 | 0.927152 |
+| Tabular / XGBoost | 0.998127 | 0.955096 | 0.996312 | 0.972718 | 0.711538 | **0.948718** | 0.813187 |
+| GraphSAGE / GNN | 0.995925 | 0.888078 | 0.986548 | 0.942372 | 0.376344 | 0.897436 | 0.530303 |
+| **Learned stacker** | **0.998393** | **0.956066** | **0.997396** | **0.973265** | **0.787234** | **0.948718** | **0.860465** |
 
-Reproduce with: `python tests/evaluate_models.py --dataset synthetic` (uses the shipped artifacts) or add `--retrain` to retrain first. Every number in this table and the ones below was verified by hash-checking the model/data files before and after the read (not assumed from a prior run) — see [Bug #29 in BUGS.md](BUGS.md#bug-29--live-scorings-time-of-day-features-used-real-wall-clock-time-instead-of-the-transactions-own-timestamp) for exactly why that check matters here.
+Reproduce with: `python tests/evaluate_models.py --dataset synthetic` (uses the shipped artifacts) or add `--retrain` to retrain first. Every number above was verified by re-running that exact command against the shipped artifacts, not copied from a prior report — see [Bug #29 in BUGS.md](BUGS.md#bug-29--live-scorings-time-of-day-features-used-real-wall-clock-time-instead-of-the-transactions-own-timestamp) for why that check matters here.
+
+### Understanding these metrics
+
+Seven numbers per model is a lot to take at face value, so here's what each one is actually answering, in plain terms, for this specific problem — a rare-event classifier where missing real fraud and wrongly blocking real customers cost different things:
+
+| Metric | What it answers | Why it matters here | Its blind spot |
+|---|---|---|---|
+| **Precision** | "Of the transactions this model flagged as fraud, how many actually were?" | Low precision means real customers get blocked or held for nothing — a direct experience/trust cost. | Says nothing about fraud the model *missed* entirely. |
+| **Recall** | "Of the transactions that actually were fraud, how many did this model catch?" | Missed fraud is the cost the whole system exists to prevent — undetected fraud is a direct loss. | Recall alone is trivially maximized by flagging everything — meaningless without precision alongside it. |
+| **F1** | A single number balancing precision and recall (their harmonic mean). | Useful for ranking models when neither false positives nor false negatives is obviously more important. | Hides *which* of precision or recall is weak — two very differently-shaped models can share one F1. |
+| **ROC-AUC** | "If you picked one random fraud case and one random legitimate case, how often would the model score the fraud case higher?" | A threshold-independent view of separability — useful for comparing models before committing to an operating point. | With fraud this rare (78 of 9,218 — under 1%), ROC-AUC stays high almost by default, because it's dominated by the huge non-fraud majority the model gets right almost for free. |
+| **PR-AUC** | Same idea as ROC-AUC, but plotted on precision vs. recall instead — much less forgiving when the positive class is rare. | A far more honest single number for this kind of imbalance than ROC-AUC — this is why PR-AUC is treated as the primary ranking metric internally, not ROC-AUC. | Still a single-number summary; it can't tell you the model's behavior *at the threshold the policy layer actually uses*. |
+| **Accuracy** | "What fraction of all predictions were correct?" | Reported for completeness. | Actively misleading on a 99%-benign dataset — a model that never flags anything would still score ~99% accuracy. Not trusted alone anywhere in this project. |
+| **Balanced accuracy** | Accuracy, but averaged per-class instead of per-transaction, so the rare fraud class counts as much as the common benign class. | Fixes accuracy's imbalance blind spot without needing a probability threshold. | Still a single blended number — doesn't say whether errors lean toward missed fraud or false alarms. |
+
+The practical takeaway: **accuracy and ROC-AUC look great for almost any model on a dataset this imbalanced, so they're reported here for completeness but not used to make decisions.** Precision, recall, and PR-AUC — computed directly from the confusion matrix, not smoothed by the 99% of transactions that are easy to get right — are what actually distinguish these three models from each other, and what the decision policy's thresholds (see [End-to-end workflow](#end-to-end-workflow) below) are tuned against.
 
 ### Stacker effect
 
 The stacker is trained on paired predictions from the same synthetic transaction population. Because fraud is rare, the stacker uses **`class_weight="balanced"`**, so the minority fraud class receives inverse-frequency weight rather than allowing the majority class to dominate the logistic objective. The base models are also class-aware: XGBoost uses `scale_pos_weight`, while GraphSAGE uses a positive-class loss weight.
 
-This is important because the two base models observe different evidence: XGBoost is optimized for transaction-level class imbalance, while the GNN learns from graph relationships and can produce a different precision/recall trade-off. The stacker therefore does not simply average their outputs — but it does **not** uniformly beat both base models on every metric, and that's disclosed here rather than only reporting the numbers where it wins:
-
-- **Beats both base models:** ROC-AUC (**0.978301**, best of the three — +0.003056 vs XGBoost, +0.001803 vs GNN), balanced accuracy (**0.946930**, best).
-- **Beats XGBoost, loses to GNN:** accuracy (0.988004 vs GNN's 0.989095), precision (0.958904 vs GNN's 0.985714 — GNN has only 1 FP vs the stacker's 3), F1 (0.927152 vs GNN's 0.932432).
-- **Beats GNN, loses to XGBoost:** PR-AUC (0.936574 vs XGBoost's 0.937142 — negligibly), recall (ties XGBoost at 0.897436, both beat GNN's 0.884615).
-- Final confusion matrix: **70 TP / 3 FP / 8 FN / 836 TN**.
-
-The honest read: the stacker isn't "beats every base model on every axis" — no single row in the table is universally dominant. Its case is that it's the best or tied-best on ROC-AUC and balanced accuracy specifically, which matter most for a system that has to pick *where* to draw the threshold rather than commit to one fixed operating point — the other two models each have a metric where they clearly win, but also one where they clearly lose. See [**Bug #29** in BUGS.md](BUGS.md) for how this evaluation almost shipped with numbers from a different, non-reproducible model state, and for a case (ring2 IP-proxy fraud) that scores lower than the golden matrix originally expected even with correct, deterministic inputs.
+In this reproducible run, the stacker is **best or tied-best on every metric in the table above** — it isn't simply averaging the two base models' outputs, it's correcting for where each one is weakest (XGBoost's precision, GNN's precision most of all — GNN alone throws 116 false positives against the stacker's 20, at matched recall). Final confusion matrix: **74 TP / 20 FP / 4 FN / 9,120 TN**.
 
 The learned stacker coefficients for this run were:
 
 | Input | Coefficient |
 |---|---:|
-| Tabular (XGBoost) probability | **3.5231** |
-| GNN probability | **2.2624** |
-| Shared-device signal | **0.1539** |
-| Shared-IP signal | **0.0103** |
-| Intercept | **-2.7783** |
+| Tabular (XGBoost) probability | **6.6455** |
+| GNN probability | **3.0112** |
+| Shared-IP signal | **0.2922** |
+| Shared-device signal | **0.1768** |
+| Intercept | **-4.6001** |
 
-The coefficients are learned from the training population via cross-validated regularization strength (see [Hyperparameter Selection](#hyperparameter-selection-cv) below) — the system does not use a hand-picked weighted average. Note how small the shared-IP coefficient is relative to shared-device: this is part of the finding documented in Bug #29.
+The coefficients are learned from the training population via cross-validated regularization strength (see [Hyperparameter Selection](#hyperparameter-selection-cv) below) — the system does not use a hand-picked weighted average.
+
+**Two things this aggregate table doesn't show, disclosed rather than hidden:** aggregate metrics are computed over the whole held-out pool, dominated by easy cases — they don't guarantee every individual hard scenario clears the operating threshold the live policy actually uses. Re-running the project's own golden fraud-scenario matrix (`pytest tests/test_edge_case_matrix.py`) against these exact shipped artifacts, two specific scenarios currently score below where the matrix expects them: `USER_RING1_1` (device-sharing ring, GNN ~99% confident) and `USER_RING2_1` (shared-IP proxy ring, GNN ~99.7% confident) both come back **LOW** on the blended stacker score alone. In both cases the live policy's `MODEL_DISAGREEMENT` guardrail (tabular and GNN disagreeing by ≥0.45) can still force `HUMAN_REVIEW` regardless of the blended score — which is the layered-defense point made in [Why the architecture is stronger than a single fraud model](#why-the-architecture-is-stronger-than-a-single-fraud-model) — but the blended score itself under-weighting two of the project's own flagship ring scenarios is a real, current gap, not a hypothetical one. It's also evidence that this coefficient set is sensitive to exactly which synthetic run trained it (see [Bug #29 in BUGS.md](BUGS.md) for the earlier version of this same finding, when only the ring2 case was affected) — worth knowing before quoting these metrics as a permanent property of the architecture rather than a snapshot of this run.
 
 ### Expanded synthetic scenario coverage
+
 
 The generator includes both graph-driven and transaction-only cases:
 
@@ -658,7 +674,8 @@ distributed-production contracts. The complete bug ledger — including this val
 [BUGS.md](BUGS.md).
 
 ```mermaid
-flowchart LR
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 48}}}%%
+flowchart TB
     UI[Dashboard HTML/JS] --> API[FastAPI]
     API --> ML[XGBoost + GraphSAGE + stacker]
     ML --> POLICY[Risk policy + guardrails]
@@ -762,7 +779,8 @@ RazorRisk now supports horizontal API/worker scaling with Redis as the shared co
 ### Distributed architecture
 
 ```mermaid
-flowchart LR
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 48}}}%%
+flowchart TB
     C[Clients] --> LB[Load Balancer]
     LB --> A1[API Replica 1]
     LB --> A2[API Replica N]
@@ -815,7 +833,8 @@ Supabase is a good fit because it provides managed PostgreSQL plus connection po
 ### Database flow
 
 ```mermaid
-flowchart LR
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 48}}}%%
+flowchart TB
     API1[API Replica 1] --> PG[(PostgreSQL / Supabase)]
     APIN[API Replica N] --> PG
     W1[Investigation Worker 1] --> PG
@@ -850,15 +869,18 @@ The earlier README sections describing SQLite, including the historical Bug 12 d
 RazorRisk now exposes operational telemetry for the API and investigation workers rather than relying only on application logs.
 
 ```mermaid
-flowchart LR
-    C[Client] --> API[FastAPI API]
-    API --> M[/Prometheus /metrics/]
-    API --> OT[OpenTelemetry Traces]
-    W[Investigation Workers] --> WM[/Worker Metrics :9101/]
-    WM --> P[Prometheus]
-    M --> P
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 48}}}%%
+flowchart TB
+    API[FastAPI API] --> PM[Prometheus /metrics]
+    W1[Worker Replica 1] --> PW1[Worker Metrics :9101]
+    WN[Worker Replica N] --> PWN[Worker Metrics :9101]
+    PW1 --> PM
+    PWN --> PM
+    API --> OT[OpenTelemetry SDK]
+    W1 --> OTW[OpenTelemetry SDK]
     OT --> COL[OTLP Collector / APM]
-    P --> G[Grafana]
+    OTW --> COL
+    PM --> G[Grafana]
 ```
 
 ### RED metrics
@@ -1321,14 +1343,14 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
   so far — only the deterministic fallback has. Run one provider-specific investigation with a real key and
   verify timeout, malformed-JSON fallback, provider-failure fallback, and action allowlisting.
 - `ml/models/gnn_eval.json` (written by running `ml/train_gnn.py` standalone) and the `gnn_only` block in
-  `ml/models/aggregator_eval.json` report different numbers because they evaluate at different
-  granularities — one held-out **users** (225), the other held-out **users' transactions** (917) — not
-  because either file is stale or wrong. Worth a one-line note wherever these are documented, since a
-  reader diffing the two files by hand would reasonably think something was broken.
+  `ml/models/aggregator_eval.json` currently report different totals (1,035 rows vs 9,218 rows) because
+  they come from different evaluation entry points — not because either file is stale or wrong. Worth a
+  one-line note wherever these are documented, since a reader diffing the two files by hand would
+  reasonably think something was broken.
 - `ml/hyperparameter_search.py::main()` computes a full GNN cross-validation pass through a `... if False
   else None` expression that is immediately discarded and recomputed on the next line — harmless, but
   doubles the GNN CV cost for no reason. Safe to delete.
-- Bug #29's two disclosed detection gaps (ring2 IP-proxy under-scoring; `is_night` over-reliance on
-  `USER_RING1_1`) remain open by design — see that entry in [BUGS.md](BUGS.md) for why they weren't
-  papered over with a lucky threshold.
-
+- Two disclosed detection gaps remain open by design, currently affecting **both** flagship ring
+  scenarios rather than only `USER_RING2_1` as in the original Bug #29 write-up — see
+  [Stacker effect](#stacker-effect) above for the current numbers and [Bug #29 in BUGS.md](BUGS.md) for
+  why this wasn't papered over with a lucky threshold or a cherry-picked retrain.
