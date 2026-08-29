@@ -64,10 +64,22 @@ def apply_decision_policy(txn: dict[str, Any], risk: dict[str, Any]) -> dict[str
     reasons: list[str] = []
     evidence: dict[str, Any] = {}
 
+    # Bug #30: graph.evidence_available is False only on a user's genuine
+    # first-ever transaction (no persisted history to build a graph node
+    # from yet — see ml/risk_aggregator.py::live_gnn_score_and_evidence).
+    # In that case gnn == 0.0 is an absence of data, not a second model's
+    # considered opinion, so comparing it against the tabular score isn't
+    # "disagreement" — it's the same information gap MODEL_UNCERTAINTY
+    # already exists to name when the *combined* score is ambiguous.
+    # Treating a missing signal as a contradicting one used to force every
+    # first-time transaction with real tabular signal into human review and
+    # cap its calibrated score below AUTO_BLOCK_THRESHOLD, permanently.
+    graph_evidence_available = graph.get("evidence_available", True)
+
     # These are policy triggers, not fraud labels.
     if 0.35 <= stack <= 0.65:
         reasons.append("MODEL_UNCERTAINTY")
-    if abs(tab - gnn) >= 0.45:
+    if graph_evidence_available and abs(tab - gnn) >= 0.45:
         reasons.append("MODEL_DISAGREEMENT")
     if amount >= 50000:
         reasons.append("HIGH_IMPACT")
