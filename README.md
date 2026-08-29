@@ -1,15 +1,6 @@
-![alt text](image-7.png)
-![alt text](image-8.png)
-![alt text](image-9.png)
-![alt text](image-10.png)
-![alt text](image-11.png)
-![alt text](image-12.png)
-![alt text](image-13.png)
-![alt text](image-14.png)
-![alt text](image-15.png)
-
 # RazorRisk — Agentic AI Payment Fraud & Risk Investigation Platform
-live link -> https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/dashboard/
+
+**Live demo:** https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/dashboard/
 
 > **A production-inspired AI risk prototype that combines transaction-level machine learning, graph-based fraud-community signals, calibrated score fusion, security guardrails, and human-in-the-loop investigation.**
 
@@ -22,7 +13,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 ## Table of Contents
 
 - [Highlights](#highlights)
-- [Live Demo / Screenshots](#live-demo-screenshots)
+- [Live Demo / Screenshots](#live-demo--screenshots)
 - [Why RazorRisk?](#why-razorrisk)
 - [What the project demonstrates](#what-the-project-demonstrates)
   - [1. Transaction-level fraud detection](#1-transaction-level-fraud-detection)
@@ -34,8 +25,8 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
   - [7. Evidence-grounded investigation](#7-evidence-grounded-investigation)
   - [8. Auditable model decomposition](#8-auditable-model-decomposition)
 - [End-to-end workflow](#end-to-end-workflow)
-  - [Transaction flow](#transaction-flow-data-moving-through-the-system)
-  - [System structure](#system-structure-how-components-connect-and-complement-each-other)
+  - [Transaction flow](#transaction-flow--data-moving-through-the-system)
+  - [System structure](#system-structure--how-components-connect-and-complement-each-other)
   - [Causal graph update](#causal-graph-update)
 - [Why the architecture is stronger than a single fraud model](#why-the-architecture-is-stronger-than-a-single-fraud-model)
 - [Evaluation](#evaluation)
@@ -44,12 +35,14 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
   - [Expanded synthetic scenario coverage](#expanded-synthetic-scenario-coverage)
 - [Hyperparameter Selection (CV)](#hyperparameter-selection-cv)
 - [Current model/data contract](#current-modeldata-contract)
-- [What the evaluation proves — and what it does not](#what-the-evaluation-proves-and-what-it-does-not)
-- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed)
-  - [Bugs 1–6](#bug-1-fraud-ring-graph-explosion) · [Bugs 7–13](#bugs-713-earlier-architecture-and-deployment-fixes) · [Bugs 18–29](#bugs-1829-found-after-the-architecture-looked-done)
+- [What the evaluation proves — and what it does not](#what-the-evaluation-proves--and-what-it-does-not)
+- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 36 numbered bugs across four phases; full write-ups in [BUGS.md](BUGS.md)
 - [Testing](#testing)
 - [Tech Stack](#tech-stack)
 - [Deployment](#deployment)
+  - [Production Distributed Runtime](#production-distributed-runtime)
+  - [Production Data Plane — PostgreSQL / Supabase](#production-data-plane--postgresql--supabase)
+  - [Production Observability — Metrics, Tracing & SLO Signals](#production-observability--metrics-tracing--slo-signals)
 - [Quick Start](#quick-start)
 - [Suggested Demo Flow](#suggested-demo-flow)
 - [Repository Structure](#repository-structure)
@@ -57,7 +50,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - [How RazorRisk Mitigates Those Limitations](#how-razorrisk-mitigates-those-limitations)
 - [Limitations and Defensible Scope](#limitations-and-defensible-scope)
 - [FAQ](#faq)
-- [References / Further Reading](#references-further-reading)
+- [References / Further Reading](#references--further-reading)
 - [Status](#status)
 
 ---
@@ -73,7 +66,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - **Evidence-grounded investigation** — four deterministic tools (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`) compute the underlying evidence; an LLM, when available, interprets it rather than inventing it.
 - **One coherent synthetic evaluation domain** — both XGBoost and GraphSAGE are trained and evaluated from the same RazorRisk synthetic transaction population, using complementary transaction-level and relational feature sets; the learned stacker is trained on paired predictions from those same transactions.
 - **A golden adversarial test matrix** — `tests/GOLDEN_TEST_MATRIX.md` checks the trained model against dozens of named fraud-ring and benign-look-alike scenarios (hostel Wi-Fi, carrier-NAT, festival sales, family devices) and discloses, by name, the cases that are still gaps rather than claiming full coverage.
-- **A published bug history, not just a feature list** — 29 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
+- **A published bug history, not just a feature list** — 36 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
 - **One shared production data layer** — PostgreSQL/Supabase is the production source of truth for transactions, risk scores, HITL state, and investigations; SQLite is retained only as an explicit test/local fallback.
 
 ---
@@ -82,13 +75,14 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 
 | | |
 |---|---|
-| **Dashboard** — live transaction feed with risk tiers (`LOW`/`HIGH`) and actions (`APPROVE`/`HOLD_FOR_INVESTIGATION`), synthetic fraud-ring and benign-look-alike rows, with the "Reseed synthetic data" control | ![Dashboard](image.png) |
-| **Graph topology explorer** — the interactive User↔Device↔IP↔Merchant visualization graph, showing a 7-user fraud ring converging on one shared device and one flagged merchant | ![Graph topology view](image-3.png) |
-| **Live stream** — the recent-transactions table and the audit log view, correlation-ID-traceable, showing the actual learned stacker weights (`tabular_coef`, `gnn_coef`) from the last training run | ![Live stream](image-4.png) ![Live stream detail](image-5.png) |
-| **Evidence / Agent mode** — a live Groq-backed LangGraph investigation for `USER_RING1_1`: graph evidence (7 linked accounts, shared device, TOR proxy), a risk score of 89.2/100, and a `HOLD_FOR_INVESTIGATION` decision, next to the mode-selector showing `Auto (priority order)` and `Groq (Auto)` | ![Agent investigation report](image-1.png) ![Agent evidence breakdown](image-2.png) |
-| **Audit system logs** — the risk-engine and agent-investigation log channels side by side, correlation-ID-traceable | ![Audit system logs](image-6.png) |
+| **1. Risk Simulator** — the live payment-risk evaluator: preset one-click scenarios (`Normal txn`, `Fraud ring #1 (device)`, `Fraud ring #2 (proxy IP)`, `Carding attack`), the velocity-source toggle, and the composite risk panel showing the tabular/GNN/stacker score decomposition plus instant graph evidence (shared devices, shared IPs, community size) for the submitted transaction | ![Risk Simulator](image-7.png) |
+| **2. Graph Topology** — the interactive User↔Device↔IP↔Merchant network view for the same scenario: a 7-user fraud ring (`USER_RING1_1`…`_7`) converging on one shared device and IP, with two merchants shown as context nodes | ![Graph topology view](image-8.png) |
+| **3. Agent Investigation** — a live Groq-backed LangGraph investigation report: evidence breakdown (graph, device/connection risk, transaction velocity, ML model signals), the fraud hypothesis and reasoning, and the recommended action (`BLOCK_ACCOUNT_AND_HOLD_FUNDS`) with its rationale | ![Agent investigation report](image-9.png) ![Agent investigation reasoning](image-10.png) |
+| **4. Human Review Queue** — a persisted, real `HUMAN_REVIEW` case: the queued reasons (`MODEL_DISAGREEMENT`, `HIGH_IMPACT`, `EVIDENCE_CONFLICT`), the structured device/network/merchant evidence gathered for the reviewer, and the actual Approve / Hold / Block controls a reviewer would use to resolve it | ![Human review queue](image-11.png) ![Human review queue evidence and actions](image-12.png) |
+| **5. Live Stream** — the recent-transactions table, scrolled to show both the raw transaction fields (user/device/IP/amount/velocity) and the full score decomposition (GNN, tabular, stacker-calibrated, final risk score, tier, action) side by side per row | ![Live stream — transaction fields](image-13.png) ![Live stream — score decomposition](image-14.png) |
+| **6. Audit System Logs** — the risk-engine and agent-investigation log channels side by side, correlation-ID-traceable, showing a real transaction's full score trail and a real Groq LLM investigation dispatch/completion pair | ![Audit system logs](image-15.png) |
 
-Screenshots reflect the actual seeded dataset and a live LLM call where noted — see [Suggested Demo Flow](#suggested-demo-flow) for what to expect if you reproduce them, and the [Evaluation](#evaluation) section for what the risk scores shown do and don't claim.
+Screenshots reflect the actual seeded dataset and a live LLM call where noted — the six views above follow the dashboard's own left-hand navigation order (Risk Simulator → Graph Topology → Agent Investigation → Human Review Queue → Live Stream → Audit System Logs). See [Suggested Demo Flow](#suggested-demo-flow) for a walkthrough script that visits the same pages in a task-driven order, and the [Evaluation](#evaluation) section for what the risk scores shown do and don't claim.
 
 ---
 
@@ -761,6 +755,200 @@ docker compose up --build
 
 ---
 
+## Production Distributed Runtime
+
+RazorRisk now supports horizontal API/worker scaling with Redis as the shared control plane.
+
+### Distributed architecture
+
+```mermaid
+flowchart LR
+    C[Clients] --> LB[Load Balancer]
+    LB --> A1[API Replica 1]
+    LB --> A2[API Replica N]
+    A1 --> RL[(Redis Rate Limiter)]
+    A2 --> RL
+    A1 --> Q[(Redis Streams Queue)]
+    A2 --> Q
+    Q --> W1[Investigation Worker 1]
+    Q --> W2[Investigation Worker N]
+    W1 --> DB[(Application Database)]
+    W2 --> DB
+    W1 --> LLM[Optional LLM Provider]
+    W2 --> LLM
+```
+
+### Shared rate limiting
+
+Rate limits are enforced with an atomic Redis Lua sliding-window operation. This prevents separate API replicas from independently allowing requests beyond the configured global limit. `429` responses include `Retry-After`.
+
+### Durable asynchronous investigations
+
+`POST /api/v1/investigations/enqueue/{transaction_id}` returns `202 Accepted` with a job ID. Workers consume the same Redis Stream consumer group and acknowledge completed messages. Stale pending messages can be reclaimed by another worker after `INVESTIGATION_RECLAIM_IDLE_MS`. Transient failures are retried up to `INVESTIGATION_MAX_ATTEMPTS`, subject to the configured SLA.
+
+`GET /api/v1/investigations/jobs/{job_id}` returns queue state, attempt count, SLA deadline, errors, and the completed result.
+
+### Production configuration
+
+Set `REDIS_REQUIRED=true` in production. The Docker Compose stack includes Redis with AOF persistence and a dedicated investigation-worker service. Scale workers independently from API replicas.
+
+> **Database note:** Redis provides the shared distributed control plane for rate limiting and investigation jobs, while PostgreSQL/Supabase provides the shared production application data plane. The SQLite path is retained only for tests and zero-infrastructure local execution.
+
+---
+
+## Production Data Plane — PostgreSQL / Supabase
+
+> **Current architecture update:** RazorRisk's production application dataset is now PostgreSQL-backed. The checked-in `razor_risk.db` artifact is not part of the production data path — it exists only as a convenience for the manual/no-Docker Quick Start path (see **Quick Start**, option B), which explicitly falls back to SQLite. Deployments that set `DATABASE_URL` to a PostgreSQL URL (the default, and the only supported production path) never touch this file.
+
+### Shared production database
+
+The API and investigation workers use the same network-accessible PostgreSQL data plane through `DATABASE_URL`. This removes the previous single-file SQLite bottleneck and makes transaction/risk/investigation state visible consistently across replicas.
+
+Supported deployment modes:
+
+1. **Local/staging:** PostgreSQL from `docker-compose.yml`.
+2. **Managed production:** Supabase PostgreSQL or another managed PostgreSQL service.
+3. **Tests:** explicit SQLite fallback through `tests/conftest.py`; this does not represent the production architecture.
+
+Supabase is a good fit because it provides managed PostgreSQL plus connection pooling. For RazorRisk's persistent FastAPI and worker processes, configure the Supabase **session-mode** connection in `DATABASE_URL`. See [`docs/SUPABASE_SETUP.md`](docs/SUPABASE_SETUP.md).
+
+### Database flow
+
+```mermaid
+flowchart LR
+    API1[API Replica 1] --> PG[(PostgreSQL / Supabase)]
+    APIN[API Replica N] --> PG
+    W1[Investigation Worker 1] --> PG
+    WN[Investigation Worker N] --> PG
+    PG --> DATA[Transactions + Risk Scores + HITL + Investigations]
+    REDIS[(Redis)] --> API1
+    REDIS --> APIN
+    REDIS --> W1
+    REDIS --> WN
+```
+
+### Dataset
+
+The reproducible fraud dataset remains generated by `data/generate_synthetic_data.py`, but it is now inserted into PostgreSQL rather than a local `.db` file. Dataset composition and production ingestion instructions are documented in [`data/DATASET.md`](data/DATASET.md).
+
+The default demo seed remains **1,500 users / 12,000 transactions / seed 42**, including fraud rings and benign look-alike communities used by the ML evaluation suite.
+
+### Supabase configuration
+
+See [`docs/SUPABASE_SETUP.md`](docs/SUPABASE_SETUP.md) for the managed deployment setup. Never commit a Supabase database password or service credential.
+
+### Historical SQLite architecture notes
+
+The earlier README sections describing SQLite, including the historical Bug 12 discussion, are intentionally retained below for traceability. They describe the architecture that existed before the PostgreSQL migration; they are not the current production data-plane specification.
+
+---
+
+## Production Observability — Metrics, Tracing & SLO Signals
+
+> **Additive production observability layer:** this section documents the observability implementation added after the core distributed architecture. Existing README history and architecture sections remain unchanged.
+
+RazorRisk now exposes operational telemetry for the API and investigation workers rather than relying only on application logs.
+
+```mermaid
+flowchart LR
+    C[Client] --> API[FastAPI API]
+    API --> M[/Prometheus /metrics/]
+    API --> OT[OpenTelemetry Traces]
+    W[Investigation Workers] --> WM[/Worker Metrics :9101/]
+    WM --> P[Prometheus]
+    M --> P
+    OT --> COL[OTLP Collector / APM]
+    P --> G[Grafana]
+```
+
+### RED metrics
+
+The API exposes:
+
+- `razorrisk_http_requests_total` — request count by method, route and status.
+- `razorrisk_http_request_duration_seconds` — request latency histogram.
+- `razorrisk_http_requests_in_flight` — concurrent requests.
+- `razorrisk_scores_total` — risk-tier/decision distribution.
+- `razorrisk_score_duration_seconds` — scoring latency.
+- `razorrisk_rate_limit_hits_total` — rejected distributed-rate-limit requests.
+- `razorrisk_dependency_failures_total` — dependency failures such as Redis rate-limiter outages.
+
+Workers expose:
+
+- `razorrisk_investigations_total` — completed/retried/failed investigations.
+- `razorrisk_investigation_duration_seconds` — investigation execution latency.
+- `razorrisk_investigation_retries_total` — retry count.
+- `razorrisk_investigation_queue_depth` — approximate Redis Stream length.
+
+### Tracing
+
+OpenTelemetry instrumentation creates request-level traces for FastAPI. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces to an OTLP-compatible collector/APM. Without an endpoint, tracing does not emit network traffic. `OTEL_CONSOLE_EXPORTER=true` can be used for local trace inspection.
+
+A useful production trace is:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API
+    participant R as Redis
+    participant M as ML Pipeline
+    participant Q as Redis Stream
+    participant W as Worker
+    participant D as PostgreSQL
+    participant L as LLM Provider
+
+    C->>A: POST /transactions/score
+    A->>R: Distributed rate-limit check
+    A->>M: XGBoost + GraphSAGE + stacker
+    M-->>A: Risk + policy
+    A->>D: Persist transaction/risk
+    A-->>C: Risk decision + correlation ID
+    C->>A: Enqueue investigation
+    A->>Q: XADD job
+    Q->>W: Deliver job
+    W->>M: Re-score + evidence
+    W->>L: Optional bounded LLM call
+    W->>D: Persist investigation
+```
+
+### Local observability stack
+
+The Docker Compose stack now includes:
+
+- **Prometheus** on `http://localhost:9090`
+- **Grafana** on `http://localhost:3000`
+- API metrics on `http://localhost:8000/metrics`
+- Worker metrics on `http://localhost:9101/metrics`
+
+Grafana is provisioned with Prometheus automatically. Configure `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` instead of using demo credentials outside local development.
+
+### SLO-oriented signals
+
+The telemetry supports operational targets such as:
+
+| Signal | Operational question |
+|---|---|
+| API latency | Is synchronous scoring meeting its latency objective? |
+| Error rate | Are requests failing or dependencies degrading? |
+| Queue depth | Is investigation demand exceeding worker capacity? |
+| Investigation latency | Are jobs approaching the 2-hour SLA? |
+| Retry count | Are workers/dependencies unstable? |
+| Rate-limit hits | Is traffic abusive or unexpectedly bursty? |
+| Human-review rate | Is policy generating excessive manual workload? |
+| Risk-tier distribution | Has transaction behavior shifted? |
+
+These metrics are **operational telemetry, not a claim of automatic model-drift detection**. Formal drift monitoring still requires comparing feature/prediction distributions and ground-truth outcomes over time.
+
+### Production scaling
+
+API replicas can be scaled independently from investigation workers. Prometheus scrapes each replica/worker target, and Grafana aggregates the time series. For a multi-replica deployment, use a Prometheus-compatible long-term metrics backend if retention beyond the local Prometheus instance is required.
+
+### Diagram source
+
+The production observability Mermaid source is maintained at [`docs/diagrams/observability.mmd`](docs/diagrams/observability.mmd) alongside the existing diagram sources.
+
+---
+
 ## Quick Start
 
 ### 1. Clone
@@ -866,18 +1054,27 @@ For a short technical demo:
 
 ## Repository Structure
 
-- `agent/` — investigation agent and deterministic fallback
-- `api/` — FastAPI routes
-- `data/` — synthetic generator and external-dataset tooling
-- `db/` — PostgreSQL-first schema and database access (SQLite explicit test/local fallback)
-- `ml/` — tabular model, GNN, stacker, policy, and graph logic
-- `security/` — evidence APIs and guardrails
-- `static/` — frontend dashboard
-- `tests/` — unit, integration, regression, and evaluation tests
-- `logs/` — runtime audit/system logs
-- `README.md`
-- `PROJECT_WORKFLOW.md`
-- `requirements.txt`
+- `agent/` — investigation agent (LangGraph orchestration, LLM investigator, deterministic fallback, tool prompts)
+- `api/` — FastAPI routes (`transactions`, `agent`, `hitl`, `graph`, `admin`, `logs`) and app entrypoint (`main.py`)
+- `data/` — synthetic transaction generator, Kaggle ULB ingestion, SQLite→Postgres migration, dataset docs
+- `db/` — schema (`schema.sql`) and the dual-dialect database access layer (Postgres-first; SQLite explicit test/local fallback)
+- `ml/` — tabular model (XGBoost), GNN (`risk_graph.py`), graph builder, stacker/aggregator, decision policy, watchlist, hyperparameter search, and the trained model artifacts (`ml/models/`)
+- `infra/` — Redis client, sliding-window rate limiter, async investigation worker/jobs, Prometheus/OTel observability wiring
+- `security/` — evidence-tool guardrails (allowlist, rate limits, input validation) and the simulated evidence API
+- `static/` — the frontend dashboard (`index.html`, `app.js`, `graph_vis.js`, `styles.css`)
+- `demo/` — `run_demo.py`, a scripted end-to-end walkthrough against a live server
+- `docs/` — architecture diagrams (Mermaid sources), `OBSERVABILITY.md`, `SUPABASE_SETUP.md`
+- `grafana/` — the RazorRisk overview dashboard and Prometheus/Grafana provisioning config
+- `notebooks/` — `hyperparameter_search.ipynb`, the exploratory counterpart to `ml/hyperparameter_search.py`
+- `tests/` — unit, integration, regression, contract, and evaluation tests, plus the golden fraud-scenario matrix
+- `logs/` — runtime audit/system logs (one file per subsystem, correlation-ID-traceable)
+- `README.md` — this file
+- `BUGS.md` — the full 36-bug engineering history referenced throughout this README
+- `PROJECT_WORKFLOW.md` — the development process behind that history
+- `config.py`, `run.py` — configuration and local entrypoint
+- `requirements.txt`, `pyproject.toml`, `uv.lock` — Python dependencies
+- `Dockerfile`, `docker-compose.yml`, `render.yaml`, `vercel.json` — deployment manifests (see [Deployment](#deployment))
+- `prometheus.yml` — local Prometheus scrape config for the observability stack (see [Production Observability](#production-observability--metrics-tracing--slo-signals))
 
 ---
 
@@ -1135,196 +1332,3 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
   `USER_RING1_1`) remain open by design — see that entry in [BUGS.md](BUGS.md) for why they weren't
   papered over with a lucky threshold.
 
----
-
-## Production Distributed Runtime
-
-RazorRisk now supports horizontal API/worker scaling with Redis as the shared control plane.
-
-### Distributed architecture
-
-```mermaid
-flowchart LR
-    C[Clients] --> LB[Load Balancer]
-    LB --> A1[API Replica 1]
-    LB --> A2[API Replica N]
-    A1 --> RL[(Redis Rate Limiter)]
-    A2 --> RL
-    A1 --> Q[(Redis Streams Queue)]
-    A2 --> Q
-    Q --> W1[Investigation Worker 1]
-    Q --> W2[Investigation Worker N]
-    W1 --> DB[(Application Database)]
-    W2 --> DB
-    W1 --> LLM[Optional LLM Provider]
-    W2 --> LLM
-```
-
-### Shared rate limiting
-
-Rate limits are enforced with an atomic Redis Lua sliding-window operation. This prevents separate API replicas from independently allowing requests beyond the configured global limit. `429` responses include `Retry-After`.
-
-### Durable asynchronous investigations
-
-`POST /api/v1/investigations/enqueue/{transaction_id}` returns `202 Accepted` with a job ID. Workers consume the same Redis Stream consumer group and acknowledge completed messages. Stale pending messages can be reclaimed by another worker after `INVESTIGATION_RECLAIM_IDLE_MS`. Transient failures are retried up to `INVESTIGATION_MAX_ATTEMPTS`, subject to the configured SLA.
-
-`GET /api/v1/investigations/jobs/{job_id}` returns queue state, attempt count, SLA deadline, errors, and the completed result.
-
-### Production configuration
-
-Set `REDIS_REQUIRED=true` in production. The Docker Compose stack includes Redis with AOF persistence and a dedicated investigation-worker service. Scale workers independently from API replicas.
-
-> **Database note:** Redis provides the shared distributed control plane for rate limiting and investigation jobs, while PostgreSQL/Supabase provides the shared production application data plane. The SQLite path is retained only for tests and zero-infrastructure local execution.
-
----
-
-# Production Data Plane — PostgreSQL / Supabase
-
-> **Current architecture update:** RazorRisk's production application dataset is now PostgreSQL-backed. The checked-in `razor_risk.db` artifact is not part of the production data path — it exists only as a convenience for the manual/no-Docker Quick Start path (see **Quick Start**, option B), which explicitly falls back to SQLite. Deployments that set `DATABASE_URL` to a PostgreSQL URL (the default, and the only supported production path) never touch this file.
-
-## Shared production database
-
-The API and investigation workers use the same network-accessible PostgreSQL data plane through `DATABASE_URL`. This removes the previous single-file SQLite bottleneck and makes transaction/risk/investigation state visible consistently across replicas.
-
-Supported deployment modes:
-
-1. **Local/staging:** PostgreSQL from `docker-compose.yml`.
-2. **Managed production:** Supabase PostgreSQL or another managed PostgreSQL service.
-3. **Tests:** explicit SQLite fallback through `tests/conftest.py`; this does not represent the production architecture.
-
-Supabase is a good fit because it provides managed PostgreSQL plus connection pooling. For RazorRisk's persistent FastAPI and worker processes, configure the Supabase **session-mode** connection in `DATABASE_URL`. See [`docs/SUPABASE_SETUP.md`](docs/SUPABASE_SETUP.md).
-
-### Database flow
-
-```mermaid
-flowchart LR
-    API1[API Replica 1] --> PG[(PostgreSQL / Supabase)]
-    APIN[API Replica N] --> PG
-    W1[Investigation Worker 1] --> PG
-    WN[Investigation Worker N] --> PG
-    PG --> DATA[Transactions + Risk Scores + HITL + Investigations]
-    REDIS[(Redis)] --> API1
-    REDIS --> APIN
-    REDIS --> W1
-    REDIS --> WN
-```
-
-### Dataset
-
-The reproducible fraud dataset remains generated by `data/generate_synthetic_data.py`, but it is now inserted into PostgreSQL rather than a local `.db` file. Dataset composition and production ingestion instructions are documented in [`data/DATASET.md`](data/DATASET.md).
-
-The default demo seed remains **1,500 users / 12,000 transactions / seed 42**, including fraud rings and benign look-alike communities used by the ML evaluation suite.
-
-### Supabase configuration
-
-See [`docs/SUPABASE_SETUP.md`](docs/SUPABASE_SETUP.md) for the managed deployment setup. Never commit a Supabase database password or service credential.
-
-### Historical SQLite architecture notes
-
-The earlier README sections describing SQLite, including the historical Bug 12 discussion, are intentionally retained below for traceability. They describe the architecture that existed before the PostgreSQL migration; they are not the current production data-plane specification.
-
----
-
-# Production Observability — Metrics, Tracing & SLO Signals
-
-> **Additive production observability layer:** this section documents the observability implementation added after the core distributed architecture. Existing README history and architecture sections remain unchanged.
-
-RazorRisk now exposes operational telemetry for the API and investigation workers rather than relying only on application logs.
-
-```mermaid
-flowchart LR
-    C[Client] --> API[FastAPI API]
-    API --> M[/Prometheus /metrics/]
-    API --> OT[OpenTelemetry Traces]
-    W[Investigation Workers] --> WM[/Worker Metrics :9101/]
-    WM --> P[Prometheus]
-    M --> P
-    OT --> COL[OTLP Collector / APM]
-    P --> G[Grafana]
-```
-
-### RED metrics
-
-The API exposes:
-
-- `razorrisk_http_requests_total` — request count by method, route and status.
-- `razorrisk_http_request_duration_seconds` — request latency histogram.
-- `razorrisk_http_requests_in_flight` — concurrent requests.
-- `razorrisk_scores_total` — risk-tier/decision distribution.
-- `razorrisk_score_duration_seconds` — scoring latency.
-- `razorrisk_rate_limit_hits_total` — rejected distributed-rate-limit requests.
-- `razorrisk_dependency_failures_total` — dependency failures such as Redis rate-limiter outages.
-
-Workers expose:
-
-- `razorrisk_investigations_total` — completed/retried/failed investigations.
-- `razorrisk_investigation_duration_seconds` — investigation execution latency.
-- `razorrisk_investigation_retries_total` — retry count.
-- `razorrisk_investigation_queue_depth` — approximate Redis Stream length.
-
-### Tracing
-
-OpenTelemetry instrumentation creates request-level traces for FastAPI. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces to an OTLP-compatible collector/APM. Without an endpoint, tracing does not emit network traffic. `OTEL_CONSOLE_EXPORTER=true` can be used for local trace inspection.
-
-A useful production trace is:
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as API
-    participant R as Redis
-    participant M as ML Pipeline
-    participant Q as Redis Stream
-    participant W as Worker
-    participant D as PostgreSQL
-    participant L as LLM Provider
-
-    C->>A: POST /transactions/score
-    A->>R: Distributed rate-limit check
-    A->>M: XGBoost + GraphSAGE + stacker
-    M-->>A: Risk + policy
-    A->>D: Persist transaction/risk
-    A-->>C: Risk decision + correlation ID
-    C->>A: Enqueue investigation
-    A->>Q: XADD job
-    Q->>W: Deliver job
-    W->>M: Re-score + evidence
-    W->>L: Optional bounded LLM call
-    W->>D: Persist investigation
-```
-
-### Local observability stack
-
-The Docker Compose stack now includes:
-
-- **Prometheus** on `http://localhost:9090`
-- **Grafana** on `http://localhost:3000`
-- API metrics on `http://localhost:8000/metrics`
-- Worker metrics on `http://localhost:9101/metrics`
-
-Grafana is provisioned with Prometheus automatically. Configure `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` instead of using demo credentials outside local development.
-
-### SLO-oriented signals
-
-The telemetry supports operational targets such as:
-
-| Signal | Operational question |
-|---|---|
-| API latency | Is synchronous scoring meeting its latency objective? |
-| Error rate | Are requests failing or dependencies degrading? |
-| Queue depth | Is investigation demand exceeding worker capacity? |
-| Investigation latency | Are jobs approaching the 2-hour SLA? |
-| Retry count | Are workers/dependencies unstable? |
-| Rate-limit hits | Is traffic abusive or unexpectedly bursty? |
-| Human-review rate | Is policy generating excessive manual workload? |
-| Risk-tier distribution | Has transaction behavior shifted? |
-
-These metrics are **operational telemetry, not a claim of automatic model-drift detection**. Formal drift monitoring still requires comparing feature/prediction distributions and ground-truth outcomes over time.
-
-### Production scaling
-
-API replicas can be scaled independently from investigation workers. Prometheus scrapes each replica/worker target, and Grafana aggregates the time series. For a multi-replica deployment, use a Prometheus-compatible long-term metrics backend if retention beyond the local Prometheus instance is required.
-
-### Diagram source
-
-The production observability Mermaid source is maintained at [`docs/diagrams/observability.mmd`](docs/diagrams/observability.mmd) alongside the existing diagram sources.
