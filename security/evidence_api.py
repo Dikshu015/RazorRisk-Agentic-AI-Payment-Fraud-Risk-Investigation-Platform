@@ -45,10 +45,15 @@ def _device_intelligence(transaction_id: str, user_id: str, device_id: str) -> d
             ).fetchone()
         except Exception:
             return {"provider": "device_intelligence", "available": False, "reason": "evidence store unavailable"}
+
+        first_seen_val = first_seen[0] if first_seen else None
+        if hasattr(first_seen_val, "isoformat"):
+            first_seen_val = first_seen_val.isoformat()
+
         return {
             "provider": "device_intelligence", "found": first_seen is not None,
             "device_account_count": int(account_count or 0),
-            "device_first_seen": first_seen[0] if first_seen else None,
+            "device_first_seen": first_seen_val,
             "note": "Account count is evidence only; it is not itself a fraud verdict.",
         }
     finally:
