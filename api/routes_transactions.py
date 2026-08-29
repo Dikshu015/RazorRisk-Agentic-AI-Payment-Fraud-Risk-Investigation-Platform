@@ -1,7 +1,7 @@
 import json
 import uuid
 import datetime
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from ml.risk_aggregator import calculate_composite_risk_score, HIGH_RISK_THRESHOLD, invalidate_live_graph_snapshot
@@ -11,6 +11,8 @@ from api.routes_hitl import enqueue_review
 from ml.graph_builder import graph_builder
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger, bind_correlation_id, clear_correlation_id
+from infra.rate_limit import enforce_rate_limit
+from infra.observability import SCORE_TOTAL, SCORE_LATENCY, span
 
 logger = get_logger("api_transactions")
 
@@ -35,12 +37,14 @@ class TransactionPayload(BaseModel):
     velocity_1h: Optional[int] = Field(default=None, ge=0, description="Client velocity used only when velocity_enabled is True")
 
 @router.post("/score")
-def score_transaction(payload: TransactionPayload):
+async def score_transaction(request: Request, payload: TransactionPayload):
     """
     Evaluates an incoming payment transaction in real-time.
     Computes Tabular ML fraud probability, GNN node embedding score, and graph topology risk.
     Returns immediately; high-risk/HITL transactions are investigated by a separate follow-up request.
     """
+    await enforce_rate_limit(request, scope="transaction-score", limit=120)
+
     txn_dict = payload.model_dump()
     txn_id = txn_dict.get("transaction_id") or f"TXN_{uuid.uuid4().hex[:8].upper()}"
     txn_dict["transaction_id"] = txn_id
@@ -50,11 +54,13 @@ def score_transaction(payload: TransactionPayload):
     # carries this same ID, so `grep <corr_id> logs/*.log` reconstructs the
     # full cross-subsystem trace of one transaction's decision.
     corr_id = bind_correlation_id()
+    score_started = __import__("time").perf_counter()
     logger.info(f"Received live transaction scoring request: TxnID:{txn_id}, User:{payload.user_id}, Amt:₹{payload.amount}")
 
     try:
         # 1. Compute Composite Risk Score
-        risk_res = calculate_composite_risk_score(txn_dict)
+        with span("razorrisk.risk_scoring", {"transaction.id": txn_id, "transaction.amount": payload.amount}):
+            risk_res = calculate_composite_risk_score(txn_dict)
         policy_res = apply_decision_policy(txn_dict, risk_res)
         risk_res.update(policy_res)
 
@@ -87,7 +93,7 @@ def score_transaction(payload: TransactionPayload):
         """, (
             txn_id, payload.user_id, payload.device_id, payload.ip_address, payload.merchant_id,
             payload.amount, payload.currency, datetime.datetime.now().isoformat(), "COMPLETED",
-            risk_res["velocity_1h"], 1 if risk_res.get("velocity_source") == "CLIENT" else 0,
+            risk_res["velocity_1h"], risk_res.get("velocity_source") == "CLIENT",
             risk_res.get("velocity_source", "BACKEND"), risk_res["amount_zscore_prior"]
         ))
 
@@ -153,6 +159,11 @@ def score_transaction(payload: TransactionPayload):
         logger.error(f"Scoring failed for TxnID:{txn_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Transaction scoring failed (correlation_id={corr_id}). Check logs/risk_engine.log for details.")
     finally:
+        elapsed = __import__("time").perf_counter() - score_started
+        if SCORE_LATENCY is not None:
+            SCORE_LATENCY.observe(elapsed)
+        if SCORE_TOTAL is not None and "risk_res" in locals():
+            SCORE_TOTAL.labels(risk_res.get("risk_tier", "UNKNOWN"), risk_res.get("decision", "UNKNOWN")).inc()
         clear_correlation_id()
 
 @router.get("/recent")
