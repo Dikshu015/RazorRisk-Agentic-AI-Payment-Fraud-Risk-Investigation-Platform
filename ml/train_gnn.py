@@ -36,7 +36,7 @@ import json
 import numpy as np
 import sqlite3
 
-from ml.common import user_level_split, classification_report_dict, RNG_SEED
+from ml.common import user_level_split, classification_report_dict, load_tuned_hyperparameters, RNG_SEED
 from ml.risk_graph import build_user_graph, detect_communities, fetch_node_features, build_adjacency
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger
@@ -50,8 +50,8 @@ GNN_EVAL_PATH = os.path.join(MODEL_DIR, "gnn_eval.json")
 
 HIDDEN_DIM_1 = 16
 HIDDEN_DIM_2 = 8
-LEARNING_RATE = 0.05
-EPOCHS = 400
+LEARNING_RATE = 0.03
+EPOCHS = 350
 
 
 # ---------------------------------------------------------------------------
@@ -91,12 +91,14 @@ class RiskGNN:
     GraphSAGEInference below on purpose — inference and training are
     different concerns and shouldn't share a class."""
 
-    def __init__(self, in_dim, seed=RNG_SEED):
+    def __init__(self, in_dim, seed=RNG_SEED, hidden_dim_1=None, hidden_dim_2=None):
         rng = np.random.default_rng(seed)
-        self.layer1 = SAGELayer(in_dim, HIDDEN_DIM_1, rng)
-        self.layer2 = SAGELayer(HIDDEN_DIM_1, HIDDEN_DIM_2, rng)
-        limit = np.sqrt(6 / (HIDDEN_DIM_2 + 1))
-        self.Wc = rng.uniform(-limit, limit, size=(HIDDEN_DIM_2, 1))
+        h1 = hidden_dim_1 or HIDDEN_DIM_1
+        h2 = hidden_dim_2 or HIDDEN_DIM_2
+        self.layer1 = SAGELayer(in_dim, h1, rng)
+        self.layer2 = SAGELayer(h1, h2, rng)
+        limit = np.sqrt(6 / (h2 + 1))
+        self.Wc = rng.uniform(-limit, limit, size=(h2, 1))
         self.bc = np.zeros(1)
 
     def forward(self, X, A_mean):
@@ -186,13 +188,24 @@ def train_gnn():
     sigma[sigma == 0] = 1
     X_norm = (X - mu) / sigma
 
-    pos_weight = n_neg / max(n_pos, 1)
-    model = RiskGNN(in_dim=X.shape[1])
+    # Bug #28: read the CV-search result instead of the hardcoded
+    # module-level defaults — see ml/common.py::load_tuned_hyperparameters().
+    # Falls back to HIDDEN_DIM_1/HIDDEN_DIM_2/LEARNING_RATE/EPOCHS above if
+    # the search hasn't been run yet.
+    tuned = load_tuned_hyperparameters()
+    gnn_params = tuned.get("gnn", {}).get("best_params", {})
+    hidden_dim_1 = gnn_params.get("hidden_dim_1", HIDDEN_DIM_1)
+    hidden_dim_2 = gnn_params.get("hidden_dim_2", HIDDEN_DIM_2)
+    learning_rate = gnn_params.get("learning_rate", LEARNING_RATE)
+    epochs = gnn_params.get("epochs", EPOCHS)
 
-    logger.info(f"Training GraphSAGE ({EPOCHS} epochs, lr={LEARNING_RATE}, pos_weight={pos_weight:.1f})...")
-    for epoch in range(1, EPOCHS + 1):
+    pos_weight = n_neg / max(n_pos, 1)
+    model = RiskGNN(in_dim=X.shape[1], hidden_dim_1=hidden_dim_1, hidden_dim_2=hidden_dim_2)
+
+    logger.info(f"Training GraphSAGE ({epochs} epochs, lr={learning_rate}, pos_weight={pos_weight:.1f})...")
+    for epoch in range(1, epochs + 1):
         model.forward(X_norm, A_mean)
-        model.backward(y, train_mask, pos_weight, A_mean, LEARNING_RATE)
+        model.backward(y, train_mask, pos_weight, A_mean, learning_rate)
         if epoch % 100 == 0 or epoch == 1:
             l = model.loss(y, train_mask, pos_weight)
             logger.info(f"  epoch {epoch:4d}  train_loss={l:.4f}")
