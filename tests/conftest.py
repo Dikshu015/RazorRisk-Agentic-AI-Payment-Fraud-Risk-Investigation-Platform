@@ -1,7 +1,17 @@
-"""Pytest bootstrap for a clean, directly runnable RazorRisk test suite."""
+"""Pytest bootstrap: tests use isolated SQLite; production uses PostgreSQL."""
+import os
+from pathlib import Path
+
+# Keep the deterministic unit/regression suite infrastructure-free. Production
+# deployments must provide DATABASE_URL pointing at PostgreSQL/Supabase.
+os.environ.setdefault("DATABASE_URL", f"sqlite:///{Path('/tmp') / 'razorrisk_test.db'}")
+
 from db.database import init_db
 
 
 def pytest_sessionstart(session):
-    """Ensure schema exists before any test module touches raw SQLite."""
     init_db()
+    # Seed the deterministic golden fixture once so tests that inspect the
+    # synthetic communities directly do not depend on the shipped SQLite DB.
+    from data.generate_synthetic_data import generate_dataset
+    generate_dataset(num_users=1500, num_transactions=12000, seed=42)

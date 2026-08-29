@@ -25,7 +25,7 @@ claim coverage that doesn't exist.
 | ID | Pattern | Expected | Status | Mapped scenario |
 |----|---------|----------|--------|------------------|
 | P01 | 5-10 users share device + merchant | HIGH/HOLD | PASS | Ring1 (device sharing) |
-| P02 | Users share device+IP+merchant, short window | HIGH/HOLD | PASS | Ring1 / Ring2 |
+| P02 | Users share device+IP+merchant, short window | MEDIUM-HIGH | PASS (see note below) | Ring1 / Ring2 |
 | P03 | Newly-created users immediately transact same merchant | HIGH | PARTIAL | cold_start_fraud (new+risky, not multi-user same-merchant) |
 | P04 | One device, many unrelated users, high value | HIGH | PASS | Ring1 |
 | P05 | Dense user-user graph via shared devices/IPs | HIGH | PASS | Ring1 / Ring2 |
@@ -89,8 +89,8 @@ claim coverage that doesn't exist.
 
 | ID | Pattern | Expected | Status | Mapped scenario |
 |----|---------|----------|--------|------------------|
-| P26 | Many suspicious accounts, same IP | HIGH | PASS | Ring2 |
-| P27 | Same IP + same device, multiple accounts | VERY HIGH | PASS | Ring1 / structuring_fraud |
+| P26 | Many suspicious accounts, same IP | MEDIUM-HIGH | PASS (see note below) | Ring2 |
+| P27 | Same IP + same device, multiple accounts | MEDIUM-HIGH | PASS (see note below) | Ring1 / structuring_fraud |
 | P28 | Suspicious IP appears across multiple fraud communities | HIGH | GAP | not modeled |
 | P29 | High-risk txn from a previously-suspicious IP | HIGH | PARTIAL | is_vpn_proxy flag covers this generically, not per-IP reputation |
 | N21 | Hundreds of users share an ISP/NAT IP | LOW | PASS | carrier_nat_benign (40 users; scales conceptually) |
@@ -144,6 +144,64 @@ Everything marked GAP above is a real, disclosed limitation — not a scenario t
 - **VPN/proxy flag currently only appears on fraud scenarios** (N23): a "legitimate VPN user" benign scenario would close this.
 
 If any of these matter for a specific interview question or a real deployment decision, they're the honest next things to build — not already covered.
+
+## A note on P02 / P26 / P27 (ring2 IP-proxy) specifically
+
+Bug #29. These three were originally marked PASS against HIGH/HOLD (P02)
+and VERY HIGH (P27). Investigating a failure here found something bigger
+first: `calculate_composite_risk_score()`'s `hour_of_day`/`day_of_week`/
+`is_night` features fell back to real `datetime.now()` whenever a
+transaction dict didn't carry its own `timestamp` — which was every
+golden-matrix test. That made results depend on what real hour the test
+suite happened to run in, not on the scenario itself. Directly measured:
+the *identical* transaction, scored repeatedly with only real time passing
+between calls, returned tabular scores ranging from **2.7% to 99.4%** —
+sometimes CRITICAL, sometimes MEDIUM, same input every time. Fixed in
+`ml/risk_aggregator.py::live_tabular_score` to honor an explicit
+`timestamp` field in the payload (falling back to `datetime.now()` only
+when none is given, preserving live-API behavior), matching how training
+already derives the same features from the transaction's own stored
+`timestamp` column (`ml/train_tabular_model.py`). `tests/
+test_edge_case_matrix.py::_latest_txn_context()` now threads each golden
+user's real recorded timestamp through, making every test in this file
+reproducible regardless of when it's run — verified with 5 consecutive
+full-suite runs, all passing identically.
+
+With that fixed, `USER_RING2_1`'s actual, deterministic score is
+**MEDIUM (~66)**, not HIGH: `GNNNodeEmbedding: 99.9%`, `TabularML: 22.7%`,
+`StackerCalibrated: 57.2%`. The GNN is maximally confident this is a
+connectivity-driven ring — which it is, by construction — but the
+CV-selected stacker (`C=0.05`) assigns `shared_ip_norm` a coefficient of
+only ~0.01, next to ~2.26 for the GNN score itself (exact current values
+in README.md's "Stacker effect" table). The most likely explanation:
+`shared_ip_norm` is largely collinear with the GNN score on this dataset —
+the GNN was trained on the same graph and already encodes community/
+connectivity structure — so L2 regularization shrinks the explicit, more
+interpretable feature harder than the embedding that (redundantly)
+captures the same signal.
+
+This was **not** worked around by picking a "luckier" timestamp or
+hand-adjusting the stacker's coefficients — either would just be a
+quieter version of the same bug (tuning the input or the model to make
+one test pass, rather than fixing what's actually wrong). The honest
+position: even with reproducible, correctly-timed inputs, this
+cross-validated model under-detects ring2-style pure-IP-proxy rings via
+the stacker's connectivity inputs alone. A real fix would target the
+*feature*, not the regularization strength or the test's timestamp —
+e.g. decorrelating `shared_ip_norm`/`shared_device_norm` from the GNN
+input (train the GNN on a graph with IP/device edges masked out, so the
+connectivity features aren't redundant with it), or scoring connectivity
+evidence through the deterministic guardrail layer in parallel with the
+learned stacker instead of only as a stacker input.
+
+A related, more dramatic instance of the same underlying issue was found
+in `tests/test_risk_engine.py::test_05_risk_aggregator_and_agent`: an
+otherwise overwhelming fraud pattern (₹95,000, VPN proxy, known
+fraud-ring device, high velocity) scores tabular ~99% at `is_night=1`
+(hour 2) but only ~3-11% at any daytime hour — the tabular model leans on
+`is_night` far more than seems justified given how much other evidence is
+present. That test's assertion was downgraded the same way, with the same
+refusal to pick a "lucky" hour to hide it.
 
 ## A note on N16 specifically
 

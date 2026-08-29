@@ -16,5 +16,5 @@ def test_synthetic_evaluation_artifacts_are_complete():
             assert 0.0 <= metrics[key] <= 1.0, f"{model_name}.{key} out of range"
 
 
-def test_external_kaggle_evaluator_exists():
+def test_synthetic_evaluator_exists():
     assert (ROOT / "tests" / "evaluate_models.py").exists()
