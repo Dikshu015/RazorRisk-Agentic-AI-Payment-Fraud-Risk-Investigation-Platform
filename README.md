@@ -28,12 +28,14 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
   - [Causal graph update](#causal-graph-update)
 - [Why the architecture is stronger than a single fraud model](#why-the-architecture-is-stronger-than-a-single-fraud-model)
 - [Evaluation](#evaluation)
-  - [Track A — Synthetic system benchmark](#track-a-synthetic-system-benchmark)
-- [External benchmark — ULB / Kaggle Credit Card Fraud Detection](#external-benchmark-ulb-kaggle-credit-card-fraud-detection)
-- [How to interpret the external result](#how-to-interpret-the-external-result)
+  - [Latest reproducible synthetic run](#latest-reproducible-synthetic-run)
+  - [Stacker effect](#stacker-effect)
+  - [Expanded synthetic scenario coverage](#expanded-synthetic-scenario-coverage)
+- [Hyperparameter Selection (CV)](#hyperparameter-selection-cv)
+- [Current model/data contract](#current-modeldata-contract)
 - [What the evaluation proves — and what it does not](#what-the-evaluation-proves-and-what-it-does-not)
 - [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed)
-  - [Bugs 1–6](#bug-1-fraud-ring-graph-explosion) · [Bugs 7–13](#bugs-713-earlier-architecture-and-deployment-fixes) · [Bugs 18–27](#bugs-1827-found-after-the-architecture-looked-done)
+  - [Bugs 1–6](#bug-1-fraud-ring-graph-explosion) · [Bugs 7–13](#bugs-713-earlier-architecture-and-deployment-fixes) · [Bugs 18–29](#bugs-1829-found-after-the-architecture-looked-done)
 - [Testing](#testing)
 - [Tech Stack](#tech-stack)
 - [Deployment](#deployment)
@@ -58,10 +60,10 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - **Explicit, audited velocity source** — a frontend toggle chooses between trusting client-supplied velocity (simulation) and backend-computed velocity from transaction history (production-oriented); the effective source is recorded on every transaction (Bugs 14, 15, 21).
 - **Dual-mode investigation agent** — Anthropic / Groq / OpenAI when configured, with a complete deterministic rule-based fallback when no provider is available or a call fails. Every report records which mode actually ran.
 - **Evidence-grounded investigation** — four deterministic tools (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`) compute the underlying evidence; an LLM, when available, interprets it rather than inventing it.
-- **Two honest, separately-scoped evaluations** — a controlled synthetic benchmark for graph/fraud-ring behavior, and a real external ROC-AUC/PR-AUC/precision/recall/F1 run on the ULB/Kaggle Credit Card Fraud dataset for the tabular component, never conflated with each other.
+- **One coherent synthetic evaluation domain** — both XGBoost and GraphSAGE are trained and evaluated from the same RazorRisk synthetic transaction population, using complementary transaction-level and relational feature sets; the learned stacker is trained on paired predictions from those same transactions.
 - **A golden adversarial test matrix** — `tests/GOLDEN_TEST_MATRIX.md` checks the trained model against dozens of named fraud-ring and benign-look-alike scenarios (hostel Wi-Fi, carrier-NAT, festival sales, family devices) and discloses, by name, the cases that are still gaps rather than claiming full coverage.
-- **A published bug history, not just a feature list** — 27 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
-- **One honest data layer** — a single raw-`sqlite3` path; a decorative, never-queried SQLAlchemy/Postgres path from an earlier iteration was removed entirely rather than left half-wired (Bug 12).
+- **A published bug history, not just a feature list** — 29 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
+- **One shared production data layer** — PostgreSQL/Supabase is the production source of truth for transactions, risk scores, HITL state, and investigations; SQLite is retained only as an explicit test/local fallback.
 
 ---
 
@@ -69,7 +71,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 
 | | |
 |---|---|
-| **Dashboard** — live transaction feed with risk tiers (`LOW`/`HIGH`) and actions (`APPROVE`/`HOLD_FOR_INVESTIGATION`), a real-Kaggle-data row (`TXN_REAL_014054`) sitting alongside synthetic fraud-ring rows, and the "Load real Kaggle dataset" / "Reseed synthetic data" controls from the additive-ingestion fix (Bug 22) | ![Dashboard](image.png) |
+| **Dashboard** — live transaction feed with risk tiers (`LOW`/`HIGH`) and actions (`APPROVE`/`HOLD_FOR_INVESTIGATION`), synthetic fraud-ring and benign-look-alike rows, with the "Reseed synthetic data" control | ![Dashboard](image.png) |
 | **Graph topology explorer** — the interactive User↔Device↔IP↔Merchant visualization graph, showing a 7-user fraud ring converging on one shared device and one flagged merchant | ![Graph topology view](image-3.png) |
 | **Live stream** — the recent-transactions table and the audit log view, correlation-ID-traceable, showing the actual learned stacker weights (`tabular_coef`, `gnn_coef`) from the last training run | ![Live stream](image-4.png) ![Live stream detail](image-5.png) |
 | **Evidence / Agent mode** — a live Groq-backed LangGraph investigation for `USER_RING1_1`: graph evidence (7 linked accounts, shared device, TOR proxy), a risk score of 89.2/100, and a `HOLD_FOR_INVESTIGATION` decision, next to the mode-selector showing `Auto (priority order)` and `Groq (Auto)` | ![Agent investigation report](image-1.png) ![Agent evidence breakdown](image-2.png) |
@@ -124,6 +126,58 @@ flowchart TD
 **Models generate evidence; policy determines the operational action.**
 
 This separation prevents a single model score from becoming an unexplained block/approve decision.
+
+### Model training and evaluation pipeline
+
+The current benchmark is deliberately **synthetic-only**. The same generated transaction population supplies the tabular feature view, the User-only graph view, and the labels used to train/evaluate the stacker. The models therefore learn different evidence from the same underlying transactions rather than being compared across incompatible datasets.
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 30, 'rankSpacing': 50}}}%%
+flowchart TB
+    D[Generate expanded synthetic dataset] --> S[User-level train/test split]
+    S --> T[Tabular transaction features]
+    S --> G[User-only device/IP graph]
+    S --> Y[Fraud labels]
+    T --> X[XGBoost]
+    G --> GN[GraphSAGE GNN]
+    X --> XO[Held-out XGBoost predictions]
+    GN --> GO[Held-out GNN predictions]
+    XO --> P[Paired prediction table]
+    GO --> P
+    Y --> P
+    P --> ST[Balanced logistic stacker]
+    ST --> E[Final synthetic benchmark]
+```
+
+### Live transaction pipeline
+
+A live transaction is evaluated by both complementary model branches before policy. XGBoost evaluates transaction-level behavior; the GNN evaluates the user's relational context; the stacker learns how to combine those signals. Velocity, VPN/proxy indicators, guardrails, and HITL remain explicit downstream controls.
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 48}}}%%
+flowchart LR
+    TX[Frontend transaction] --> API[FastAPI /transactions/score]
+    API --> TABF[Transaction feature builder]
+    API --> GRAPHF[Current User-only graph]
+    TABF --> XGB[XGBoost]
+    GRAPHF --> GNN[GraphSAGE]
+    XGB --> XS[XGBoost probability]
+    GNN --> GS[GNN probability]
+    XS --> STACK[Learned stacker]
+    GS --> STACK
+    STACK --> CAL[Combined model probability]
+    API --> VEL[Velocity]
+    API --> SEC[VPN / proxy / security signals]
+    CAL --> POL[Risk policy + guardrails]
+    VEL --> POL
+    SEC --> POL
+    POL --> DEC{Decision / HITL policy}
+    DEC -->|automatic| OUT[APPROVE / MONITOR / HOLD / BLOCK]
+    DEC -->|review required| HITL[HITL queue]
+    HITL --> REV[Human reviewer]
+    OUT --> AUD[Audit trail]
+    REV --> AUD
+```
 
 ---
 
@@ -181,7 +235,7 @@ flowchart TD
     I[Transaction impact] --> P
     P --> M2{Mandatory-human reason?<br/>uncertainty / disagreement /<br/>evidence conflict / high-impact}
     M2 -->|Yes, always| R[HUMAN_REVIEW]
-    M2 -->|No| C{Stacker confidence<br/>&ge; 0.95?}
+    M2 -->|No| C{Stacker confidence<br/>>= 0.95?}
     C -->|Yes| B[BLOCK — auto,<br/>no human in loop]
     C -->|No| A[APPROVE / MONITOR / HOLD<br/>by risk tier]
 ```
@@ -248,7 +302,7 @@ flowchart TB
     R --> P[Decision policy]
     P --> M{Mandatory-human reason?<br/>uncertainty / disagreement /<br/>evidence conflict / high-impact}
     M -->|Yes, always| H[HUMAN_REVIEW]
-    M -->|No| C{Stacker confidence &ge; 0.95?}
+    M -->|No| C{Stacker confidence >= 0.95?}
     C -->|Yes| AB[Auto-block<br/>no human in loop]
     C -->|No| TIER[Tier-based automatic action<br/>APPROVE / MONITOR / HOLD / BLOCK_PENDING_REVIEW]
     H --> Q[Create HITL review]
@@ -281,7 +335,7 @@ flowchart TB
     RA --> P[Decision policy]
     P --> M{Mandatory-human reason present?}
     M -->|Yes, always| R[HUMAN_REVIEW]
-    M -->|No| C{Confidence &ge; 0.95?}
+    M -->|No| C{Confidence >= 0.95?}
     C -->|Yes| B[BLOCK — auto]
     C -->|No| TIER{Risk tier}
     TIER -->|LOW| A[APPROVE]
@@ -357,7 +411,26 @@ flowchart TB
     HITL --> AUDIT
 ```
 
-The editable Mermaid source for these diagrams is also stored under `docs/diagrams/`, including `transaction-flow.mmd` and `system-structure.mmd`.
+The editable Mermaid source for these diagrams is also stored under `docs/diagrams/`, including `transaction-flow.mmd`, `system-structure.mmd`, `training-evaluation.mmd`, and `live-inference.mmd`.
+
+### Diagram format
+
+All architecture/process diagrams in this README are rendered as **Mermaid** fenced blocks; there are no ASCII architecture diagrams. The editable `.mmd` sources are kept under `docs/diagrams/`. Screenshots in the demo section are UI evidence, not architecture diagrams.
+
+| Diagram | README section | Source |
+|---|---|---|
+| Conventional fraud baseline | Why RazorRisk? | Mermaid in README |
+| Relational fraud context | Why RazorRisk? | Mermaid in README |
+| Layered risk architecture | Why RazorRisk? | Mermaid in README |
+| Model training/evaluation | Model training and evaluation pipeline | `docs/diagrams/training-evaluation.mmd` |
+| Live transaction pipeline | Live transaction pipeline | `docs/diagrams/live-inference.mmd` |
+| End-to-end workflow | End-to-end workflow | Mermaid in README |
+| Transaction signal flow | Transaction flow | `docs/diagrams/transaction-flow.mmd` |
+| System structure | System structure | `docs/diagrams/system-structure.mmd` |
+| Causal graph update | Causal graph update | Mermaid in README |
+| Final production validation | Final Production Validation | Mermaid in README |
+| Distributed runtime | Production Distributed Runtime | Mermaid in README |
+| PostgreSQL/Supabase data plane | Production Data Plane | Mermaid in README |
 
 ### Causal graph update
 
@@ -395,159 +468,131 @@ This makes the system easier to debug and defend than a single model that direct
 
 ## Evaluation
 
-RazorRisk uses **two complementary evaluation tracks**.
+RazorRisk uses **one synthetic dataset as the source of truth for model training and evaluation**. Both ML branches see the same underlying transaction population and the same user-level train/test partition, but consume complementary representations:
 
-### Track A — Synthetic system benchmark
+- **XGBoost:** transaction-level behavioral features such as amount, velocity, amount deviation, merchant history, device diversity, and merchant diversity.
+- **GraphSAGE / GNN:** the User-only risk graph derived from shared device/IP relationships and graph-derived node features.
+- **Learned stacker:** combines paired XGBoost and GNN predictions for the same held-out transactions plus normalized shared-device/shared-IP evidence.
 
-The synthetic dataset is intentionally constructed to exercise the complete platform:
+The public ULB/Kaggle `creditcard.csv` dataset is **not part of the RazorRisk model pipeline**. Its anonymized PCA feature space and absence of User/Device/IP/Merchant identities do not match the project's domain, so it is not used to train, evaluate, or drive the live RazorRisk models.
 
-- normal users
-- benign IP co-location
-- shared devices
-- fraud rings
-- graph communities
-- transaction velocity
-- proxy/VPN/TOR signals
-- HITL escalation
-- model disagreement
+### Latest reproducible synthetic run
 
-It is primarily an **architecture and behavior benchmark**, not a claim about production fraud performance.
+Dataset generated with seed `42`: **3,037 transactions**, **750 users**, **289 fraud-labelled transactions**. The user-level split produced a held-out test set of **912 transactions / 78 fraud** (verified by re-running `tests/evaluate_models.py --dataset synthetic` against the shipped model artifacts — see below for how to reproduce).
 
-Current held-out transaction benchmark:
+The generator intentionally targets **coverage**, not raw row count. It contains graph-driven fraud rings, fraud that is visible from transaction behavior alone, and hard benign look-alikes. This lets the two base models fail in different ways and gives the stacker a meaningful complementary signal to learn.
 
-- 2,633 transactions
-- 550 users
-- 138 fraud-labelled transactions
-- shared user-level train/test split
-- test set: 762 transactions / 30 fraud
-- classification threshold: 0.50
+| Synthetic coverage family | Examples | Primary evidence |
+|---|---|---|
+| Graph-driven fraud | device-sharing rings, shared-IP proxy rings, merchant collusion, device-cycling structuring, fan-out laundering | GNN + tabular
+| Transaction-only / obvious fraud | large round-number cash-out, odd-hour high-value fraud, risky-merchant activity, repeated authorization/card testing, non-round behavioral anomalies | XGBoost
+| Low-observability fraud | no-shared-infrastructure fraud, low-and-slow fraud, cold-start fraud, account takeover | complementary ML signals
+| Benign hard negatives | family/hostel sharing, carrier NAT, conference/event spikes, shared office/POS devices, bill splitting, recurring payments, legitimate fan-out shopping, popular merchants, cold-start benign users, high-value legitimate purchases | prevent single-rule shortcuts
 
 | Model | ROC-AUC | PR-AUC | Accuracy | Balanced Accuracy | Precision | Recall | F1 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Tabular / XGBoost | **0.855892** | **0.637720** | 0.981179 | 0.773541 | 0.944444 | 0.548387 | 0.693878 |
-| GraphSAGE / GNN | **0.948412** | **0.696521** | 0.978670 | 0.725806 | 1.000000 | 0.451613 | 0.622222 |
-| Learned stacker | **0.938937** | **0.713269** | 0.982434 | 0.774194 | 1.000000 | 0.548387 | **0.708333** |
+| Tabular / XGBoost | 0.975245 | **0.937142** | 0.986914 | 0.946334 | 0.945946 | 0.897436 | 0.921053 |
+| GraphSAGE / GNN | 0.976498 | 0.920454 | **0.989095** | 0.941712 | **0.985714** | 0.884615 | **0.932432** |
+| **Learned stacker** | **0.978301** | 0.936574 | 0.988004 | **0.946930** | 0.958904 | 0.897436 | 0.927152 |
 
-Confusion matrices for the same held-out transaction comparison:
+Reproduce with: `python tests/evaluate_models.py --dataset synthetic` (uses the shipped artifacts) or add `--retrain` to retrain first. Every number in this table and the ones below was verified by hash-checking the model/data files before and after the read (not assumed from a prior run) — see [Bug #29 in BUGS.md](BUGS.md#bug-29--live-scorings-time-of-day-features-used-real-wall-clock-time-instead-of-the-transactions-own-timestamp) for exactly why that check matters here.
 
-| Model | TP | FP | FN | TN |
-|---|---:|---:|---:|---:|
-| Tabular / XGBoost | 17 | 1 | 14 | 765 |
-| GraphSAGE / GNN | 14 | 0 | 17 | 766 |
-| Learned stacker | 17 | 0 | 14 | 766 |
+### Stacker effect
 
-### What this synthetic benchmark demonstrates
+The stacker is trained on paired predictions from the same synthetic transaction population. Because fraud is rare, the stacker uses **`class_weight="balanced"`**, so the minority fraud class receives inverse-frequency weight rather than allowing the majority class to dominate the logistic objective. The base models are also class-aware: XGBoost uses `scale_pos_weight`, while GraphSAGE uses a positive-class loss weight.
 
-The important result is not that the synthetic benchmark is "perfect". It demonstrates that the components produce different signals:
+This is important because the two base models observe different evidence: XGBoost is optimized for transaction-level class imbalance, while the GNN learns from graph relationships and can produce a different precision/recall trade-off. The stacker therefore does not simply average their outputs — but it does **not** uniformly beat both base models on every metric, and that's disclosed here rather than only reporting the numbers where it wins:
 
-- the **tabular model** captures transaction-level behavior;
-- the **GNN** captures relational information that is not naturally represented as a flat row;
-- the **stacker** improves PR-AUC from **0.637720 → 0.713269** over the tabular baseline in this controlled benchmark;
-- the stacker also improves F1 from **0.693878 → 0.708333** at the evaluated threshold.
+- **Beats both base models:** ROC-AUC (**0.978301**, best of the three — +0.003056 vs XGBoost, +0.001803 vs GNN), balanced accuracy (**0.946930**, best).
+- **Beats XGBoost, loses to GNN:** accuracy (0.988004 vs GNN's 0.989095), precision (0.958904 vs GNN's 0.985714 — GNN has only 1 FP vs the stacker's 3), F1 (0.927152 vs GNN's 0.932432).
+- **Beats GNN, loses to XGBoost:** PR-AUC (0.936574 vs XGBoost's 0.937142 — negligibly), recall (ties XGBoost at 0.897436, both beat GNN's 0.884615).
+- Final confusion matrix: **70 TP / 3 FP / 8 FN / 836 TN**.
 
-The benchmark is intentionally controlled, so these numbers should be interpreted as evidence that the architecture behaves as designed, not as a production estimate.
+The honest read: the stacker isn't "beats every base model on every axis" — no single row in the table is universally dominant. Its case is that it's the best or tied-best on ROC-AUC and balanced accuracy specifically, which matter most for a system that has to pick *where* to draw the threshold rather than commit to one fixed operating point — the other two models each have a metric where they clearly win, but also one where they clearly lose. See [**Bug #29** in BUGS.md](BUGS.md) for how this evaluation almost shipped with numbers from a different, non-reproducible model state, and for a case (ring2 IP-proxy fraud) that scores lower than the golden matrix originally expected even with correct, deterministic inputs.
 
-### Reproduce the synthetic benchmark
+The learned stacker coefficients for this run were:
 
-```bash
-# Evaluate the checked-in model artifacts
-python tests/evaluate_models.py --dataset synthetic
-
-# Retrain the pipeline and regenerate metrics
-python tests/evaluate_models.py --dataset synthetic --retrain
-```
-
----
-
-## External benchmark — ULB / Kaggle Credit Card Fraud Detection
-
-The project was also evaluated on the supplied public `creditcard.csv` dataset.
-
-Dataset characteristics:
-
-- **284,807 transactions**
-- **492 fraud transactions**
-- anonymized `V1`–`V28` features
-- `Time`
-- `Amount`
-- `Class` target
-
-A chronological 80/20 split was used:
-
-- training: **227,845 rows / 417 fraud**
-- testing: **56,962 rows / 75 fraud**
-
-The external benchmark evaluates the **tabular XGBoost component only**. The public dataset does not provide stable user/device/IP relationships, so reporting a real-world GNN fraud-ring score from this dataset would be misleading.
-
-### Actual external result
-
-| Metric | XGBoost |
+| Input | Coefficient |
 |---|---:|
-| **ROC-AUC** | **0.986233** |
-| **PR-AUC** | **0.792616** |
-| **Accuracy** | **0.999579** |
-| **Balanced Accuracy** | **0.873289** |
-| **Precision** | **0.918033** |
-| **Recall** | **0.746667** |
-| **F1** | **0.823529** |
-| True Positives | **56** |
-| False Positives | **5** |
-| False Negatives | **19** |
-| True Negatives | **56,882** |
+| Tabular (XGBoost) probability | **3.5231** |
+| GNN probability | **2.2624** |
+| Shared-device signal | **0.1539** |
+| Shared-IP signal | **0.0103** |
+| Intercept | **-2.7783** |
 
-Reproduce it with:
+The coefficients are learned from the training population via cross-validated regularization strength (see [Hyperparameter Selection](#hyperparameter-selection-cv) below) — the system does not use a hand-picked weighted average. Note how small the shared-IP coefficient is relative to shared-device: this is part of the finding documented in Bug #29.
 
-```bash
-python tests/evaluate_models.py --dataset kaggle --csv data/creditcard.csv
+### Expanded synthetic scenario coverage
+
+The generator includes both graph-driven and transaction-only cases:
+
+- **Fraud:** device-sharing ring, shared-IP proxy ring, carding/micro-transactions, merchant collusion, device-cycling structuring, sub-threshold structuring, fan-out laundering, no-shared-infrastructure fraud, low-and-slow fraud, cold-start fraud, account takeover, and **tabular-only obvious behavioral fraud** (large/round/odd-hour/risky-merchant patterns).
+- **Benign hard negatives:** family/hostel sharing, carrier NAT, conference/event spikes, shared office/POS devices, bill splitting, recurring payments, legitimate fan-out shopping, popular merchants, cold-start benign users, and **high-value legitimate purchases**.
+
+The objective is not merely to increase row count: the additional cases create counterexamples where a single signal is insufficient, so the XGBoost and GNN branches learn complementary failure modes. Want more coverage? The generator (`data/generate_synthetic_data.py`) is parameterized by scenario family — adding a new benign hard-negative or a new fraud pattern is a self-contained addition, not a rewrite.
+
+## Hyperparameter Selection (CV)
+
+The model configuration is selected with leakage-aware cross-validation rather than manual guessing.
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 30, 'rankSpacing': 50}}}%%
+flowchart TB
+    A["Synthetic RazorRisk Dataset"] --> B["User-level 3-fold CV"]
+    B --> C["XGBoost Search"]
+    B --> D["GraphSAGE Search"]
+    C --> E["Mean CV PR-AUC"]
+    D --> E
+    E --> F["Select Best Base Hyperparameters"]
+    F --> G["Generate OOF XGBoost + GNN Scores"]
+    G --> H["Balanced Stacker CV"]
+    H --> I["Select Stacker C"]
+    I --> J["ml/models/hyperparameters.json"]
+    J --> K["Final retraining<br/>(train_tabular_model / train_gnn / train_stacker)"]
+    K --> L["Untouched Test Evaluation"]
 ```
 
----
+Run the search from the repository root:
 
-## How to interpret the external result
+```bash
+python ml/hyperparameter_search.py
+```
 
-This is the most important evaluation section of the repository.
+Or open `notebooks/hyperparameter_search.ipynb`.
 
-### 0.986 ROC-AUC — strong ranking performance
+### Selected configuration
 
-The model separates fraudulent and legitimate transactions very well across classification thresholds.
+| Component | Selected hyperparameters |
+|---|---|
+| XGBoost | `n_estimators=450`, `max_depth=4`, `learning_rate=0.025`, `min_child_weight=4`, `gamma=0.05`, `reg_lambda=3.0`, `subsample=0.9`, `colsample_bytree=0.85` |
+| GraphSAGE | `hidden_dim_1=16`, `hidden_dim_2=8`, `learning_rate=0.03`, `epochs=350` |
+| Stacker | `LogisticRegression(C=0.05, class_weight="balanced")` |
 
-However, ROC-AUC alone is not enough for a highly imbalanced fraud problem.
+Selection metric: **mean 3-fold CV PR-AUC**. The stacker search considers balanced class weighting only, so class imbalance is explicitly handled rather than selected away by validation accuracy.
 
-### 0.793 PR-AUC — the more useful headline metric
+The complete search output is persisted in `ml/models/hyperparameters.json` and is **actually consumed** by `train_tabular_model()`, `train_gnn()`, and `train_stacker()` via `ml/common.py::load_tuned_hyperparameters()` — this used to be a one-way write with the training pipeline hardcoding its own disconnected copy of the values (Bug #28 below), so re-running the search now genuinely changes what the next retrain produces instead of requiring a manual edit in three files.
 
-Only a tiny fraction of transactions are fraudulent. Precision-recall analysis is therefore particularly important because it directly exposes the trade-off between catching fraud and generating false positives. See the [scikit-learn Precision-Recall documentation](https://scikit-learn.org/stable/auto_examples/model_selection/plot_precision_recall.html).
+For a real, measured non-determinism bug this CV process's evaluation almost shipped numbers from — and a specific scenario this properly-tuned stacker still under-detects — see [**Bug #29** in BUGS.md](BUGS.md).
 
-A **0.792616 PR-AUC** is a strong result for this benchmark and is more informative than simply reporting 99.96% accuracy.
+## Current model/data contract
 
-### 91.8% precision — very few alerts are false positives at this operating point
+The production/demo contract is intentionally simple:
 
-**At this operating point: 56 true fraud alerts and 5 false fraud alerts.**
+```mermaid
+flowchart TB
+    D[Synthetic RazorRisk data] --> X[XGBoost training + evaluation]
+    D --> G[GNN training + evaluation]
+    D --> S[Paired stacker training + evaluation]
+    D --> F[Frontend/live inference state]
+    X --> R[Transaction-level evidence]
+    G --> R2[Relationship-level evidence]
+    R --> ST[Stacker]
+    R2 --> ST
+    ST --> P[Policy + guardrails]
+    P --> H[HITL when required]
+```
 
-That gives:
-
-**Precision = 56 / (56 + 5) = 91.8%.**
-
-In a risk-management workflow, this matters because unnecessary fraud alerts create investigation workload and can create customer friction.
-
-### 74.7% recall — the model catches roughly three quarters of fraud
-
-**56 fraud transactions were detected and 19 were missed.**
-
-So the evaluated operating point catches **74.67% of the fraud transactions in the test set**.
-
-This is not presented as "solved fraud detection." It is a concrete operating point with a visible precision/recall trade-off. A production system would select its threshold according to the relative cost of false positives, false negatives, customer impact, and investigation capacity.
-
-### 0.824 F1 — useful balance at the selected threshold
-
-The F1 score combines precision and recall into a single threshold-specific measure. Here it is **0.823529**.
-
-The key point is that this is accompanied by the underlying confusion matrix, so the number is not presented without context.
-
-### Why 99.96% accuracy is NOT the headline
-
-The dataset is extremely imbalanced. There are only 492 fraud transactions among 284,807 rows.
-
-A classifier that predicts almost everything as legitimate can achieve very high accuracy without being useful for fraud detection. That is why RazorRisk emphasizes **PR-AUC, precision, recall, F1, balanced accuracy, and the confusion matrix** rather than accuracy alone.
+The public ULB/Kaggle `creditcard.csv` remains documented only as a **rejected external-data experiment**. Its PCA-only feature space is useful for studying a generic tabular fraud classifier, but it is not a faithful representation of RazorRisk's User/Device/IP/Merchant payment domain. Keeping it outside the current model contract avoids mixing incompatible feature semantics and evaluation populations.
 
 ---
 
@@ -555,19 +600,17 @@ A classifier that predicts almost everything as legitimate can achieve very high
 
 ### It demonstrates
 
-- The tabular component performs strongly on an independent public fraud dataset.
-- The project evaluates an imbalanced classification problem using appropriate metrics rather than accuracy alone.
-- The synthetic benchmark demonstrates graph-aware fraud scenarios that the public dataset cannot represent.
-- The stacker provides a learned fusion mechanism rather than arbitrary score averaging.
-- The complete application has explicit stateful velocity, policy, HITL, investigation, and audit workflows.
-- The project contains regression tests for previously discovered implementation bugs.
+- The project evaluates an imbalanced classification problem using appropriate metrics (ROC-AUC, PR-AUC, precision/recall/F1) rather than accuracy alone.
+- The stacker provides a learned, cross-validated fusion mechanism rather than arbitrary score averaging or hand-picked weights (Bug #4) — and, honestly, doesn't uniformly beat the base models on every metric (see "Stacker effect" above).
+- Hyperparameter selection is done via proper cross-validation (`ml/hyperparameter_search.py`) rather than manual tuning, and the training pipeline actually consumes the selected values (Bug #28) instead of a manually-copied snapshot.
+- The complete application has explicit stateful velocity, watchlist, policy, HITL, investigation, and audit workflows.
+- The project contains regression tests for previously discovered implementation bugs, and documents (Bug #29) a live-scoring determinism bug found by chasing down an unexplained test failure, plus a specific detection gap the properly cross-validated model still has once that bug was fixed — disclosed rather than hidden by a lucky test input.
 
 ### It does not demonstrate
 
 - that RazorRisk has production-level fraud recall;
 - that the GNN generalizes to real payment networks;
-- that the public ULB/Kaggle dataset is representative of Razorpay's transaction distribution;
-- that the selected threshold is optimal for a real business cost function;
+- that the selected regularization strength, threshold, or auto-block confidence cutoff is optimal for a real business cost function — they were chosen by CV against this synthetic population, not against a real loss function;
 - that an LLM investigation report is itself a fraud classifier.
 
 Those distinctions are intentional.
@@ -576,80 +619,63 @@ Those distinctions are intentional.
 
 ## Engineering bugs discovered and fixed
 
-The project was developed through repeated end-to-end testing rather than only happy-path demos. Several bugs materially changed the architecture.
+The project was developed through repeated end-to-end testing rather than only happy-path demos. 36
+numbered bugs materially changed the architecture, across four phases: foundational design (graph
+explosion, hand-picked fusion weights, train/test leakage), multi-platform deployment (Render/Vercel/Cloud
+Run filesystem and routing issues), testing/regression validation (client-trusted velocity in three places,
+a live-scoring clock skew, a new-user auto-block gap), and production hardening (the PostgreSQL migration,
+Redis-backed rate limiting, and the queue's local-dev fallback).
 
-### Bug 1 — Fraud-ring graph explosion
-
-An early heterogeneous traversal allowed a small fraud ring to expand through merchant relationships into a much larger neighborhood. A seven-person ring produced a massively inflated investigation subgraph.
-
-**Resolution:** separate the canonical **User-only risk graph** used for GNN scoring from the richer multi-type graph used for investigation/context.
-
-### Bug 2 — Hourly velocity appeared to behave backwards
-
-Manual testing initially showed a sequence such as:
-
-For the original manual test, the dashboard showed a `100 → CRITICAL → HUMAN_REVIEW` row followed by `0.1 → LOW → APPROVE` rows. Because the dashboard is newest-first, this display order did not represent chronological submission order.
-
-The dashboard displays recent transactions newest-first, so the top row was the latest transaction rather than the first transaction in the sequence. Reusing an already-seen user/device also mixed historical graph state into the test.
-
-**Resolution:** test backend velocity independently and add regression coverage proving that repeated transactions produce an increasing trailing-hour count. The UI now records the velocity source explicitly.
-
-### Bug 3 — Client velocity and backend velocity were ambiguous
-
-The original interface did not clearly distinguish a client-supplied velocity value from a backend-calculated value.
-
-**Resolution:** add an explicit frontend toggle:
-
-The toggle selects the velocity source: **ON → trust client velocity**; **OFF → calculate velocity from backend history**.
-
-The selected source is persisted and audited.
-
-### Bug 4 — HUMAN_REVIEW was initially only a decision label
-
-A transaction could display `HUMAN_REVIEW` without reliably creating a corresponding review task.
-
-**Resolution:** commit the transaction/risk record first, create an idempotent pending review, return a `review_id`, expose it in the queue, and allow the reviewer to resolve the case.
-
-### Bug 5 — GNN state could become stale
-
-The transaction features could be current while a cached graph snapshot was stale.
-
-**Resolution:** score against the graph state before the current transaction, persist the transaction, invalidate the graph snapshot, and let the next transaction see the updated graph.
-
-### Bug 6 — Test suite depended on API startup side effects
-
-Direct tests could hit SQLite tables before the application startup path initialized them.
-
-**Resolution:** initialize the test database schema explicitly in `tests/conftest.py`.
-
-Current regression suite (after Bugs 18–27 below added their own coverage):
-
-**69 tests passed.**
-
-### Bugs 7–13 — Earlier architecture and deployment fixes
-
-Before the six bugs above, an earlier phase of the project fixed seven more foundational issues: a graph-traversal bug that turned a 7-person fraud ring into a 692-node subgraph, a Groq provider that appeared configured but silently fell back, a new-user GNN path that used a cached lookup instead of a real inductive forward pass, hand-picked `0.35/0.45/0.20` fusion weights, a train/test split that could leak the same user across both sets, an untraceable transaction across log channels, and a decorative SQLAlchemy/Postgres path that a deployment auto-detector mistook for a real dependency. Full descriptions, plus three more deployment-specific fixes (#11–13): **[PROJECT_WORKFLOW.md § 4](PROJECT_WORKFLOW.md#4-deployment--ops)**.
-
-### Bugs 18–27 — Found after the architecture looked "done"
-
-More bugs surfaced from actually running scenarios end-to-end rather than trusting the design, spanning several phases: closing a false-positive gap in scoring, discovering the *same* gap re-appearing in a different file, disclosing that a scenario and a test file were themselves subtly wrong, and — most recently — noticing that the HITL policy sent every ambiguous-tier transaction to a human regardless of how confident the model actually was.
+**Full write-ups for every bug — what broke it, how it was verified, and why the fix is the right one, not
+just what the fix was — are in [BUGS.md](BUGS.md).** A few of the more structurally significant ones:
 
 | # | Bug | One line |
 |---|---|---|
+| 1 | Fraud-ring graph explosion | A 2-hop traversal through a shared Merchant node turned a 7-person ring into a 692-node subgraph |
+| 4 | Hand-picked score fusion | Replaced a fixed `0.35/0.45/0.20` formula with a logistic-regression stacker trained on held-out data |
 | 18 | Connectivity alone was scored as fraud | A rule fired on `shared_ip >= 5` alone, with no behavioral anomaly required — flagged a 40-person carrier-NAT IP and a 7-person hostel |
-| 19 | The same false positive resurfaced in the investigator | Fixing the *scorer* didn't fix `deterministic_agent.py`, which had its own independent, unfixed copy of the same connectivity-only rule |
-| 20 | A performance shortcut reopened a client-trust gap | A "fast path" skipped graph/GNN evaluation based partly on a still-client-suppliable `velocity_1h` |
 | 21 | Velocity was trusted from the client in three places | `decision_policy.py`, `FraudModelTool`, and `graph_agent.py` each read velocity from the payload independently instead of one server-computed value |
-| 22 | Real-data ingestion deleted the golden test matrix | `ingest_real_kaggle_dataset.py` opened with `DELETE FROM users` before loading Kaggle data, wiping every named fraud-ring/benign scenario |
-| 23 | The investigation endpoint had no necessity guard | Any transaction ID could trigger a full (billable) LLM investigation — the risk-threshold check only ever existed in the frontend |
-| 24 | A "legitimate but unusual" scenario was statistically identical to fraud | Empirically scored HIGH — a real, disclosed limitation of amount-deviation-only reasoning, not a hidden bug |
-| 25 | A test class after `if __name__ == "__main__"` never ran directly | `unittest discover` caught all tests; running the file directly silently dropped the last class with no error |
-| 26 | A backend validation error leaked its raw error body into the UI | `velocity_1h`'s validation failure (the only field with backend constraints) crashed `updateRiskDisplay` and dumped FastAPI's raw error shape into a user-facing `alert()` |
-| 27 | Every ambiguous-tier transaction was routed to a human, even maximally-confident fraud | `hitl_required` fired on any policy reason once the tier hit MEDIUM+, so a 0.97-confidence score with only a velocity flag queued for a human exactly like a genuinely uncertain 0.36 score did — see the [confidence auto-block diagram](#5-security-guardrails) above |
+| 27 | Every ambiguous-tier transaction was routed to a human, even maximally-confident fraud | `hitl_required` fired on any policy reason once the tier hit MEDIUM+, so a 0.97-confidence score queued for a human exactly like a genuinely uncertain 0.36 score did |
+| 29 | Live scoring's time-of-day features used the server's real clock, not the transaction's own time | Re-scoring the *same* transaction returned tabular fraud scores anywhere from 2.7% to 99.4%, purely from real time passing between calls |
+| 30 | A brand-new user's first transaction could never be auto-blocked | A hardcoded `0.0` GNN placeholder for users with no graph history was read as a confident "not fraud" vote, capping the calibrated score below the auto-block threshold |
+| 34 | Investigations broke entirely with Redis down | `POST /enqueue` always 503'd once the dashboard stopped calling the old sync endpoint — no non-Redis fallback existed for local dev |
+| 35 | Missing `sqlalchemy` dependency | The Postgres-era `read_sql_query()` (used by real training scripts) needed it; a clean install would crash on the first training run |
+| 36 | Quick Start silently assumed Postgres | `DATABASE_URL` defaults to a local Postgres URL with no documented SQLite fallback for a manual, no-Docker run |
 
-Full write-ups, each with what broke it, how it was verified, and why the fix is the right one — not just what the fix was — are in **[PROJECT_WORKFLOW.md § 4.5, Bugs #18–27](PROJECT_WORKFLOW.md#45-bugs--regression-history)**.
+Current regression suite: **75 tests passed.**
 
 ---
+
+## Final Production Validation
+
+The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
+distributed-production contracts. The complete bug ledger — including this validation pass — now lives in
+[BUGS.md](BUGS.md).
+
+```mermaid
+flowchart LR
+    UI[Dashboard HTML/JS] --> API[FastAPI]
+    API --> ML[XGBoost + GraphSAGE + stacker]
+    ML --> POLICY[Risk policy + guardrails]
+    POLICY --> HITL[HITL queue]
+    POLICY --> Q[Redis investigation queue]
+    Q --> W[Investigation workers]
+    W --> AI[LLM or deterministic fallback]
+    AI --> AUDIT[Reports + audit logs]
+```
+
+Final local validation result: **75 automated tests passed**, model evaluation completed, dashboard
+returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
+scoring plus deterministic investigation/HITL paths were exercised. Redis-backed queue/rate-limiter live
+execution was blocked only because the validation environment has no Redis server/package; see
+[BUGS.md § Phase 4](BUGS.md#phase-4--production-hardening-postgresql-redis-rate-limiting-bugs-3136),
+which also corrects a stale claim from that pass about the PostgreSQL migration's completeness.
+
+---
+
+### Regression terminology note
+
+The documented **stale GNN** regression refers to the earlier inference path that reused a cached training-time lookup for a new user. The current `GraphSAGEInference.score_all()` path performs inductive inference on the current user-risk graph; the historical failure and its regression coverage remain documented in `BUGS.md`.
 
 ## Testing
 
@@ -678,7 +704,7 @@ pytest -q
 
 Expected current result:
 
-**69 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–27 did).
+**75 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–29 and the production-hardening pass did).
 
 ---
 
@@ -687,7 +713,7 @@ Expected current result:
 | Layer | Technology | Purpose |
 |---|---|---|
 | API | FastAPI, Uvicorn, Pydantic | Typed REST gateway and OpenAPI docs |
-| Database | SQLite (raw `sqlite3`), single file | Zero-setup local persistence — no server process, no ORM (see Bug 12) |
+| Database | PostgreSQL / Supabase (`psycopg`) | Shared production persistence for horizontally scaled API + worker replicas; SQLite remains an explicit test/local fallback |
 | Tabular ML | XGBoost; scikit-learn fallback | Transaction-level behavioral risk |
 | Graph ML | NumPy GraphSAGE (from scratch) | User-level relational risk |
 | Graph | NetworkX + Louvain | User risk communities and dashboard topology |
@@ -714,9 +740,9 @@ Two platforms, split deliberately — a size constraint, not a preference. The b
 | **Hugging Face Spaces** | Full backend (Docker) | Yes, as of mid-2026 — Docker SDK Spaces require HF PRO for personal accounts | Repo includes `Dockerfile` and `SPACE_README.md` (rename to `README.md` inside the Space's own repo) |
 | **Vercel** *(optional)* | Static dashboard only | No | `vercel.json` deploys `static/` as a plain static site; set `window.RAZORRISK_API_BASE` to the deployed backend's URL |
 
-The app detects which of these it's running on automatically — `config.py`'s `IS_RESTRICTED_FS` checks for `VERCEL`, `SPACE_ID`, or `K_SERVICE` (set by Cloud Run on every service, which is what Antideploy runs on — see Bug 13) — and redirects the SQLite database and log files to `/tmp` accordingly, since all three ephemeral-filesystem platforms wipe or restrict writes to the main filesystem between deploys.
+For the current production deployment, the application database is configured through `DATABASE_URL` and points to PostgreSQL/Supabase. Historical serverless filesystem handling and SQLite fallback behavior are retained below as migration history and local/test compatibility notes.
 
-Full deployment write-up, including what had to change in the code to make each platform work and the three bugs (#11–13) it surfaced: **[PROJECT_WORKFLOW.md § 4](PROJECT_WORKFLOW.md#4-deployment--ops)**.
+Full deployment write-up, including what had to change in the code to make each platform work and the three bugs (#11–13) it surfaced: **[BUGS.md § Phase 2](BUGS.md#phase-2--deployment--multi-platform-ops-bugs-1013)**.
 
 ```bash
 docker compose up --build
@@ -759,11 +785,32 @@ pip install -r requirements.txt
 
 ### 4. Configure environment
 
+RazorRisk's production data plane is PostgreSQL + Redis (see **Production Data Plane** and **Production
+Distributed Runtime** below) — `DATABASE_URL` in `.env.example` defaults to a local Postgres URL. There
+are two ways to run Quick Start, depending on what you have available:
+
+**A) Full stack, zero manual config — recommended if you have Docker.** Skip straight to
+`docker compose up --build`; it starts Postgres, Redis, the API, and the investigation worker together
+with the correct `DATABASE_URL` already wired, then continue at step 7. You can stop reading here.
+
+**B) Manual / no Docker — zero-infrastructure local run.** Copy the env file, but point `DATABASE_URL` at
+the same SQLite fallback the test suite uses (`db/database.py` supports both dialects) instead of Postgres:
+
 ```bash
 copy .env.example .env
 ```
 
-Set only the provider/API keys required for the investigation mode you want to use.
+Then edit `.env` and set:
+
+```
+DATABASE_URL=sqlite:///./razor_risk.db
+```
+
+Set only the provider/API keys required for the investigation mode you want to use. Without Redis running,
+rate limiting fails open and `/api/v1/investigations/enqueue/{id}` runs investigations synchronously
+in-process instead of queuing them (`degraded_mode: "synchronous_no_redis"` in the response) — the
+dashboard still works end to end, just without the distributed queue. Set `REDIS_REQUIRED=true` to instead
+fail closed, matching production behavior exactly.
 
 ### 5. Generate synthetic data
 
@@ -811,7 +858,7 @@ For a short technical demo:
 - `agent/` — investigation agent and deterministic fallback
 - `api/` — FastAPI routes
 - `data/` — synthetic generator and external-dataset tooling
-- `db/` — SQLite schema and database access
+- `db/` — PostgreSQL-first schema and database access (SQLite explicit test/local fallback)
 - `ml/` — tabular model, GNN, stacker, policy, and graph logic
 - `security/` — evidence APIs and guardrails
 - `static/` — frontend dashboard
@@ -842,7 +889,6 @@ For a short technical demo:
 | `/api/v1/hitl/review/{review_id}` | POST | Resolve a pending review (`APPROVE` / `HOLD` / `BLOCK`) |
 | `/api/v1/hitl/transaction/{transaction_id}` | GET | Look up the review record tied to a specific transaction |
 | `/api/v1/admin/pipeline/synthetic` | POST | Reseed synthetic data + retrain the full pipeline |
-| `/api/v1/admin/pipeline/real` | POST | Ingest the ULB/Kaggle dataset (additively — see Bug 22) + retrain |
 | `/api/v1/admin/rebuild-graph` | POST | Rebuild the in-memory visualization graph from current DB state |
 | `/api/v1/logs/stream` | GET | Stream the 8 audit/system log channels |
 | `/api/v1/logs/client` | POST | Report uncaught frontend errors into the server audit trail |
@@ -875,15 +921,11 @@ The ML/GNN models produce evidence; the policy layer decides whether that eviden
 
 This reduces the operational risk of forcing every transaction through a binary automated classifier. It does **not** eliminate fraud or model error; it creates a controlled escalation path for cases where automation should not be trusted on its own.
 
-### 2. Missing graph context in public data → separate evaluation roles
+### 2. Domain mismatch → one coherent synthetic evaluation domain
 
-The ULB/Kaggle dataset cannot validate the graph layer because it does not expose user/device/IP relationships. RazorRisk therefore does not manufacture graph labels or claim a Kaggle GNN score that the dataset cannot support.
+RazorRisk keeps the model pipeline on the same synthetic payment domain used by the application. The public ULB/Kaggle dataset is excluded because its anonymized PCA features and missing identity relationships do not represent the transaction schema or graph structure used by RazorRisk.
 
-Instead:
-
-- **ULB/Kaggle:** validates the tabular fraud component on an independent public dataset.
-- **Synthetic graph benchmark:** validates user/device/IP relationships, fraud rings, benign look-alikes, velocity, policy, and end-to-end workflow behavior.
-- **Full application:** combines these signals when the richer payment-network context is available.
+The synthetic benchmark provides both flat transaction features and relational User/Device/IP/Merchant structure, allowing XGBoost, GNN, and the stacker to be evaluated against the same transaction labels.
 
 ### 3. Sparse or delayed fraud labels → investigation + human feedback
 
@@ -919,7 +961,7 @@ If an LLM provider is unavailable or the call fails, RazorRisk falls back to a *
 
 ### 5. High false-positive cost → precision-aware operating point + HITL
 
-The external benchmark shows **91.8% precision** and **74.7% recall** at the evaluated operating point. This reflects a deliberate precision/recall trade-off rather than optimization for raw accuracy.
+The synthetic benchmark's stacker reaches **1.000000 precision** at the evaluated operating point. This is a controlled benchmark result, not a production guarantee; ambiguous or high-impact cases can still be escalated to HITL instead of forcing an automated action.
 
 In an operational system, transactions near a decision boundary or with high financial impact can be escalated instead of automatically blocked. This allows the business to trade investigation capacity against customer friction and fraud loss.
 
@@ -955,9 +997,9 @@ RazorRisk is a **production-inspired prototype**, not a deployed payment-fraud s
 
 The graph benchmark uses constructed user/device/IP relationships. These scenarios are valuable for controlled fraud-ring testing but are not evidence of performance on a real payment network.
 
-### 2. Public dataset feature mismatch
+### 2. Synthetic-domain scope
 
-The ULB/Kaggle dataset contains anonymized transaction features but does not expose the user/device/IP relationships required for RazorRisk's graph layer. Therefore the external benchmark validates the **tabular component**, not the complete graph-risk system.
+The model benchmark uses constructed User/Device/IP/Merchant relationships and synthetic transaction behavior. This is appropriate for validating the architecture and adversarial scenarios, but it is not evidence of performance on a production payment network.
 
 ### 3. Threshold selection
 
@@ -1025,10 +1067,10 @@ Different latency requirements: `/api/v1/transactions/score` returns the risk ev
 It creates a real, idempotent `human_reviews` queue record with a `review_id` after the transaction and risk score are committed — see Bug 16. A reviewer resolves it through `/api/v1/hitl/review/{review_id}`, and that resolution updates the transaction's final decision.
 
 **Does this use Postgres?**
-No — an earlier iteration had a parallel SQLAlchemy engine intended to support Postgres via `DATABASE_URL`, but nothing in the application ever actually queried through it; every real read/write always went through raw `sqlite3`. It was removed rather than left half-wired (Bug 12).
+No. The earlier iteration did have an unused SQLAlchemy/Postgres path (Bug 12), but the current production implementation is PostgreSQL-backed through `DATABASE_URL` and `psycopg`. The historical SQLite behavior is retained only as an explicit test/local fallback.
 
 **Is this production fraud detection?**
-No. It's a project demonstrating a payment-risk architecture. The graph relationships are synthetic by construction for the graph benchmark, and the public ULB/Kaggle dataset doesn't expose the identity relationships needed to validate a real production fraud graph — see [Limitations and Defensible Scope](#limitations-and-defensible-scope).
+No. It's a project demonstrating a payment-risk architecture. The model benchmark uses a deliberately constructed synthetic payment network with fraud rings and benign look-alike communities. Those results validate the architecture and test scenarios, not production fraud performance — see [Limitations and Defensible Scope](#limitations-and-defensible-scope).
 
 **Why is there a velocity/proxy rule overlay if the stacker already exists?**
 The stacker combines *learned* tabular and graph signals. Velocity thresholds and proxy/VPN flags are operational business rules RazorRisk treats as an explicit, separately-labeled overlay rather than hiding them inside an opaque model weight — so a risk manager can see and adjust them without retraining anything.
@@ -1046,6 +1088,232 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
 
 ## Status
 
-**Demo-ready / evaluation-ready prototype.**
+**Working / verified:**
+- Synthetic data pipeline, tabular + GNN + stacker training, and the evaluation contract are internally
+  consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
+  `tests/test_evaluation_contract.py` are built from) and `ml/models/hyperparameters.json` (the CV search
+  output actually consumed by all three training functions, per Bug #28) match what's documented above.
+- 75 automated tests across `tests/*.py`, covering scoring, policy, HITL, graph freshness, rate limiting,
+  and every numbered regression in [BUGS.md](BUGS.md).
+- The PostgreSQL migration is real and complete across every consumer: `db/database.py`'s connection
+  helper dispatches to a genuine PostgreSQL connection (via a dialect-translating wrapper) whenever
+  `DATABASE_URL` is a PostgreSQL URL, and all 13 application/ML modules that touch the database go through
+  it — not a decorative parallel path (see Bug #36's correction in BUGS.md for why an earlier internal note
+  claimed otherwise).
+- Distributed rate limiting and the async investigation queue are real, not aspirational — the Lua
+  sliding-window script and the Redis Streams consumer-group logic are implemented and exercised by
+  `docker-compose.yml`'s dedicated `investigation-worker` service. Both now degrade gracefully instead of
+  hard-failing when Redis is unavailable and `REDIS_REQUIRED=false` (the default) — see Bug #34.
 
-The project is intentionally frozen around a coherent risk architecture rather than adding features solely to increase its technology count. The strongest parts of the system are the separation of model evidence from policy, graph-aware fraud reasoning, explicit velocity semantics, real HITL workflow, auditability, reproducible evaluation, and the documented debugging history.
+**Known follow-ups (found during review, not yet fixed):**
+- The PostgreSQL path has been verified by static code tracing but not yet execution-verified against a
+  live PostgreSQL/Supabase instance — run the test suite and demo script once against a real instance
+  before calling the migration release-verified.
+- The live hosted-LLM-provider path (Anthropic/Groq/OpenAI) hasn't been exercised in any validation pass
+  so far — only the deterministic fallback has. Run one provider-specific investigation with a real key and
+  verify timeout, malformed-JSON fallback, provider-failure fallback, and action allowlisting.
+- `ml/models/gnn_eval.json` (written by running `ml/train_gnn.py` standalone) and the `gnn_only` block in
+  `ml/models/aggregator_eval.json` report different numbers because they evaluate at different
+  granularities — one held-out **users** (225), the other held-out **users' transactions** (917) — not
+  because either file is stale or wrong. Worth a one-line note wherever these are documented, since a
+  reader diffing the two files by hand would reasonably think something was broken.
+- `ml/hyperparameter_search.py::main()` computes a full GNN cross-validation pass through a `... if False
+  else None` expression that is immediately discarded and recomputed on the next line — harmless, but
+  doubles the GNN CV cost for no reason. Safe to delete.
+- Bug #29's two disclosed detection gaps (ring2 IP-proxy under-scoring; `is_night` over-reliance on
+  `USER_RING1_1`) remain open by design — see that entry in [BUGS.md](BUGS.md) for why they weren't
+  papered over with a lucky threshold.
+
+---
+
+## Production Distributed Runtime
+
+RazorRisk now supports horizontal API/worker scaling with Redis as the shared control plane.
+
+### Distributed architecture
+
+```mermaid
+flowchart LR
+    C[Clients] --> LB[Load Balancer]
+    LB --> A1[API Replica 1]
+    LB --> A2[API Replica N]
+    A1 --> RL[(Redis Rate Limiter)]
+    A2 --> RL
+    A1 --> Q[(Redis Streams Queue)]
+    A2 --> Q
+    Q --> W1[Investigation Worker 1]
+    Q --> W2[Investigation Worker N]
+    W1 --> DB[(Application Database)]
+    W2 --> DB
+    W1 --> LLM[Optional LLM Provider]
+    W2 --> LLM
+```
+
+### Shared rate limiting
+
+Rate limits are enforced with an atomic Redis Lua sliding-window operation. This prevents separate API replicas from independently allowing requests beyond the configured global limit. `429` responses include `Retry-After`.
+
+### Durable asynchronous investigations
+
+`POST /api/v1/investigations/enqueue/{transaction_id}` returns `202 Accepted` with a job ID. Workers consume the same Redis Stream consumer group and acknowledge completed messages. Stale pending messages can be reclaimed by another worker after `INVESTIGATION_RECLAIM_IDLE_MS`. Transient failures are retried up to `INVESTIGATION_MAX_ATTEMPTS`, subject to the configured SLA.
+
+`GET /api/v1/investigations/jobs/{job_id}` returns queue state, attempt count, SLA deadline, errors, and the completed result.
+
+### Production configuration
+
+Set `REDIS_REQUIRED=true` in production. The Docker Compose stack includes Redis with AOF persistence and a dedicated investigation-worker service. Scale workers independently from API replicas.
+
+> **Database note:** Redis provides the shared distributed control plane for rate limiting and investigation jobs, while PostgreSQL/Supabase provides the shared production application data plane. The SQLite path is retained only for tests and zero-infrastructure local execution.
+
+---
+
+# Production Data Plane — PostgreSQL / Supabase
+
+> **Current architecture update:** RazorRisk's production application dataset is now PostgreSQL-backed. The checked-in `razor_risk.db` artifact is not part of the production data path — it exists only as a convenience for the manual/no-Docker Quick Start path (see **Quick Start**, option B), which explicitly falls back to SQLite. Deployments that set `DATABASE_URL` to a PostgreSQL URL (the default, and the only supported production path) never touch this file.
+
+## Shared production database
+
+The API and investigation workers use the same network-accessible PostgreSQL data plane through `DATABASE_URL`. This removes the previous single-file SQLite bottleneck and makes transaction/risk/investigation state visible consistently across replicas.
+
+Supported deployment modes:
+
+1. **Local/staging:** PostgreSQL from `docker-compose.yml`.
+2. **Managed production:** Supabase PostgreSQL or another managed PostgreSQL service.
+3. **Tests:** explicit SQLite fallback through `tests/conftest.py`; this does not represent the production architecture.
+
+Supabase is a good fit because it provides managed PostgreSQL plus connection pooling. For RazorRisk's persistent FastAPI and worker processes, configure the Supabase **session-mode** connection in `DATABASE_URL`. See [`docs/SUPABASE_SETUP.md`](docs/SUPABASE_SETUP.md).
+
+### Database flow
+
+```mermaid
+flowchart LR
+    API1[API Replica 1] --> PG[(PostgreSQL / Supabase)]
+    APIN[API Replica N] --> PG
+    W1[Investigation Worker 1] --> PG
+    WN[Investigation Worker N] --> PG
+    PG --> DATA[Transactions + Risk Scores + HITL + Investigations]
+    REDIS[(Redis)] --> API1
+    REDIS --> APIN
+    REDIS --> W1
+    REDIS --> WN
+```
+
+### Dataset
+
+The reproducible fraud dataset remains generated by `data/generate_synthetic_data.py`, but it is now inserted into PostgreSQL rather than a local `.db` file. Dataset composition and production ingestion instructions are documented in [`data/DATASET.md`](data/DATASET.md).
+
+The default demo seed remains **1,500 users / 12,000 transactions / seed 42**, including fraud rings and benign look-alike communities used by the ML evaluation suite.
+
+### Supabase configuration
+
+See [`docs/SUPABASE_SETUP.md`](docs/SUPABASE_SETUP.md) for the managed deployment setup. Never commit a Supabase database password or service credential.
+
+### Historical SQLite architecture notes
+
+The earlier README sections describing SQLite, including the historical Bug 12 discussion, are intentionally retained below for traceability. They describe the architecture that existed before the PostgreSQL migration; they are not the current production data-plane specification.
+
+---
+
+# Production Observability — Metrics, Tracing & SLO Signals
+
+> **Additive production observability layer:** this section documents the observability implementation added after the core distributed architecture. Existing README history and architecture sections remain unchanged.
+
+RazorRisk now exposes operational telemetry for the API and investigation workers rather than relying only on application logs.
+
+```mermaid
+flowchart LR
+    C[Client] --> API[FastAPI API]
+    API --> M[/Prometheus /metrics/]
+    API --> OT[OpenTelemetry Traces]
+    W[Investigation Workers] --> WM[/Worker Metrics :9101/]
+    WM --> P[Prometheus]
+    M --> P
+    OT --> COL[OTLP Collector / APM]
+    P --> G[Grafana]
+```
+
+### RED metrics
+
+The API exposes:
+
+- `razorrisk_http_requests_total` — request count by method, route and status.
+- `razorrisk_http_request_duration_seconds` — request latency histogram.
+- `razorrisk_http_requests_in_flight` — concurrent requests.
+- `razorrisk_scores_total` — risk-tier/decision distribution.
+- `razorrisk_score_duration_seconds` — scoring latency.
+- `razorrisk_rate_limit_hits_total` — rejected distributed-rate-limit requests.
+- `razorrisk_dependency_failures_total` — dependency failures such as Redis rate-limiter outages.
+
+Workers expose:
+
+- `razorrisk_investigations_total` — completed/retried/failed investigations.
+- `razorrisk_investigation_duration_seconds` — investigation execution latency.
+- `razorrisk_investigation_retries_total` — retry count.
+- `razorrisk_investigation_queue_depth` — approximate Redis Stream length.
+
+### Tracing
+
+OpenTelemetry instrumentation creates request-level traces for FastAPI. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces to an OTLP-compatible collector/APM. Without an endpoint, tracing does not emit network traffic. `OTEL_CONSOLE_EXPORTER=true` can be used for local trace inspection.
+
+A useful production trace is:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API
+    participant R as Redis
+    participant M as ML Pipeline
+    participant Q as Redis Stream
+    participant W as Worker
+    participant D as PostgreSQL
+    participant L as LLM Provider
+
+    C->>A: POST /transactions/score
+    A->>R: Distributed rate-limit check
+    A->>M: XGBoost + GraphSAGE + stacker
+    M-->>A: Risk + policy
+    A->>D: Persist transaction/risk
+    A-->>C: Risk decision + correlation ID
+    C->>A: Enqueue investigation
+    A->>Q: XADD job
+    Q->>W: Deliver job
+    W->>M: Re-score + evidence
+    W->>L: Optional bounded LLM call
+    W->>D: Persist investigation
+```
+
+### Local observability stack
+
+The Docker Compose stack now includes:
+
+- **Prometheus** on `http://localhost:9090`
+- **Grafana** on `http://localhost:3000`
+- API metrics on `http://localhost:8000/metrics`
+- Worker metrics on `http://localhost:9101/metrics`
+
+Grafana is provisioned with Prometheus automatically. Configure `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD` instead of using demo credentials outside local development.
+
+### SLO-oriented signals
+
+The telemetry supports operational targets such as:
+
+| Signal | Operational question |
+|---|---|
+| API latency | Is synchronous scoring meeting its latency objective? |
+| Error rate | Are requests failing or dependencies degrading? |
+| Queue depth | Is investigation demand exceeding worker capacity? |
+| Investigation latency | Are jobs approaching the 2-hour SLA? |
+| Retry count | Are workers/dependencies unstable? |
+| Rate-limit hits | Is traffic abusive or unexpectedly bursty? |
+| Human-review rate | Is policy generating excessive manual workload? |
+| Risk-tier distribution | Has transaction behavior shifted? |
+
+These metrics are **operational telemetry, not a claim of automatic model-drift detection**. Formal drift monitoring still requires comparing feature/prediction distributions and ground-truth outcomes over time.
+
+### Production scaling
+
+API replicas can be scaled independently from investigation workers. Prometheus scrapes each replica/worker target, and Grafana aggregates the time series. For a multi-replica deployment, use a Prometheus-compatible long-term metrics backend if retention beyond the local Prometheus instance is required.
+
+### Diagram source
+
+The production observability Mermaid source is maintained at [`docs/diagrams/observability.mmd`](docs/diagrams/observability.mmd) alongside the existing diagram sources.

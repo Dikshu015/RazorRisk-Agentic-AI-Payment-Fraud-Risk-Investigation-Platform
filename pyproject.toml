@@ -1,5 +1,5 @@
 [project]
-name = "razor-version"
+name = "razorrisk"
 version = "0.1.0"
 description = "Agentic AI payment fraud risk investigation platform"
 readme = "README.md"
@@ -22,15 +22,25 @@ dependencies = [
     "pydantic>=2.6.0",
     "python-dotenv>=1.0.1",
     "requests>=2.31.0",
+    "redis>=5.0.0",
+    "psycopg[binary]>=3.2.0",
+    "sqlalchemy>=2.0.0",
     "scikit-learn>=1.4.0",
     "scipy>=1.12.0",
     "uvicorn[standard]>=0.28.0",
     "xgboost>=2.0.0",
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-instrumentation-fastapi>=0.46b0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
 
-[project.scripts]
-razor-version = "razor_version:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
