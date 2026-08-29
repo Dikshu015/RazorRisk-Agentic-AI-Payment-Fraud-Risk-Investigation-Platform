@@ -14,7 +14,7 @@ from utils.logger import get_logger
 
 logger = get_logger("data_generator")
 
-def generate_dataset(num_users=1500, num_transactions=12000, seed=42):
+def generate_dataset(num_users=3000, num_transactions=30000, seed=42):
     random.seed(seed)
     np.random.seed(seed)
     logger.info("Generating synthetic payments dataset with fraud rings...")
@@ -25,9 +25,11 @@ def generate_dataset(num_users=1500, num_transactions=12000, seed=42):
 
     # 1. Clear existing data
     cursor.executescript("""
-        DELETE FROM transactions;
-        DELETE FROM risk_scores;
+        DELETE FROM human_reviews;
         DELETE FROM investigation_reports;
+        DELETE FROM risk_scores;
+        DELETE FROM user_watchlist;
+        DELETE FROM transactions;
         DELETE FROM users;
         DELETE FROM devices;
         DELETE FROM ip_addresses;
@@ -436,6 +438,41 @@ def generate_dataset(num_users=1500, num_transactions=12000, seed=42):
         ips.append((hijack_ip, "RU", "Unknown", "Unknown Hosting", False))
         ato_hijack_dev[u] = hijack_dev
         ato_hijack_ip[u] = hijack_ip
+
+    # Additional tabular-only fraud population: deliberately obvious fraud
+    # that does NOT require any graph relationship. These users have private
+    # devices/IPs, but their transaction behavior is visually suspicious:
+    # unusual hour + large amount + round amount and/or repeated risky
+    # merchant activity. This prevents the tabular branch from becoming a
+    # graph-dependent second detector and gives the stacker a genuinely
+    # complementary signal.
+    obvious_fraud_users = [f"USER_OBVIOUS_FRAUD_{i:04d}" for i in range(1, 121)]
+    obvious_fraud_dev = {}
+    obvious_fraud_ip = {}
+    for u in obvious_fraud_users:
+        users.append((u, f"Obvious Behavioral Fraud {u}", f"{u}@disposable.example", now - datetime.timedelta(days=random.randint(90, 500)), "SUSPICIOUS"))
+        d_id = f"DEV_{u}_OWN"
+        ip_addr = f"172.31.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        devices.append((d_id, random.choice(["Mobile-Android", "Desktop-Windows"]), random.choice(["Android 14", "Windows 11"]), random.random() < 0.15, now - datetime.timedelta(days=random.randint(30, 300))))
+        ips.append((ip_addr, "IN", random.choice(["Mumbai", "Delhi", "Bangalore"]), random.choice(["Airtel", "Jio"]), False))
+        obvious_fraud_dev[u] = d_id
+        obvious_fraud_ip[u] = ip_addr
+
+    # Hard benign controls for the same tabular cues: legitimate high-value
+    # purchases during normal hours from established accounts, using their
+    # own stable infrastructure. These are essential negatives; otherwise
+    # the model can learn the trivial rule "large amount = fraud".
+    high_value_benign_users = [f"USER_HIGHVALUE_{i:04d}" for i in range(1, 81)]
+    high_value_dev = {}
+    high_value_ip = {}
+    for u in high_value_benign_users:
+        users.append((u, f"High Value Legitimate User {u}", f"{u}@example.com", now - datetime.timedelta(days=random.randint(300, 900)), "ACTIVE"))
+        d_id = f"DEV_{u}_OWN"
+        ip_addr = f"10.20.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        devices.append((d_id, "Mobile-iOS", "iOS 17", False, now - datetime.timedelta(days=random.randint(100, 700))))
+        ips.append((ip_addr, "IN", random.choice(["Mumbai", "Pune", "Hyderabad"]), random.choice(["Airtel", "Jio", "ACT Fiber"]), False))
+        high_value_dev[u] = d_id
+        high_value_ip[u] = ip_addr
 
     cursor.executemany("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?)", users)
     cursor.executemany("INSERT OR IGNORE INTO devices VALUES (?, ?, ?, ?, ?)", devices)
@@ -871,6 +908,68 @@ def generate_dataset(num_users=1500, num_transactions=12000, seed=42):
             f"TXN_ATOHIJACK_{u}", u, ato_hijack_dev[u], ato_hijack_ip[u], "MCH_SUSPICIOUS_99",
             hijack_amt, "INR", hijack_time, "COMPLETED", 1, round(random.uniform(4.0, 7.0), 2), True
         ))
+
+    # --- FRAUD: tabular-only behavioral anomalies. No shared device/IP
+    # relationships exist. Each account has a private infrastructure and the
+    # fraud is visible from transaction behavior alone. Mix three patterns so
+    # the model learns a family of anomalies rather than one exact template.
+    logger.info("Injecting tabular-only obvious fraud scenarios...")
+    idx = 0
+    for i, u in enumerate(obvious_fraud_users):
+        d_id = obvious_fraud_dev[u]
+        ip_addr = obvious_fraud_ip[u]
+        if i % 3 == 0:
+            # Large round-number cash-out at an unusual hour.
+            amt = random.choice([50000.0, 75000.0, 90000.0, 100000.0])
+            hour = random.choice([1, 2, 3, 4])
+            merchant = "MCH_SUSPICIOUS_99"
+            z = random.uniform(4.0, 7.0)
+        elif i % 3 == 1:
+            # Repeated same-merchant authorization attempts: card testing /
+            # cash-out probe, with moderate-to-large amounts.
+            amt = random.choice([12000.0, 15000.0, 20000.0, 25000.0])
+            hour = random.choice([0, 2, 5])
+            merchant = random.choice(mch_ids)
+            z = random.uniform(2.5, 5.0)
+        else:
+            # Large non-round transfer at a very unusual hour; no graph clue.
+            amt = round(random.uniform(45000, 98000), 2)
+            hour = random.choice([2, 3, 4])
+            merchant = "MCH_SUSPICIOUS_99"
+            z = random.uniform(3.5, 6.5)
+        tx_time = (now - datetime.timedelta(days=random.randint(0, 12))).replace(
+            hour=hour, minute=random.randint(0, 59), second=random.randint(0, 59), microsecond=0)
+        tx_list.append((
+            f"TXN_OBVIOUSFRAUD_{idx:04d}", u, d_id, ip_addr, merchant, amt, "INR",
+            tx_time, "COMPLETED", 1, round(z, 2), True
+        ))
+        idx += 1
+        # A subset has a second same-merchant attempt within the hour, making
+        # the temporal pattern explicit without introducing graph overlap.
+        if i % 4 == 0:
+            tx_list.append((
+                f"TXN_OBVIOUSFRAUD_{idx:04d}", u, d_id, ip_addr, merchant,
+                round(amt * random.uniform(0.35, 0.65), 2), "INR",
+                tx_time + datetime.timedelta(minutes=random.randint(8, 35)),
+                "COMPLETED", 2, round(max(z - 0.5, 1.5), 2), True
+            ))
+            idx += 1
+
+    # --- BENIGN: high-value legitimate purchases. Same broad amount scale as
+    # obvious fraud, but daytime, stable infrastructure, familiar merchants,
+    # and no velocity spike. This is a deliberate hard-negative population.
+    idx = 0
+    for u in high_value_benign_users:
+        for j in range(3):
+            amt = round(random.uniform(18000, 65000), 2)
+            tx_time = now - datetime.timedelta(days=random.randint(1, 25))
+            tx_time = tx_time.replace(hour=random.randint(9, 21), minute=random.randint(0, 59), second=0, microsecond=0)
+            tx_list.append((
+                f"TXN_HIGHVALUE_{idx:04d}", u, high_value_dev[u], high_value_ip[u],
+                random.choice(mch_ids), amt, "INR", tx_time, "COMPLETED", 1,
+                round(random.uniform(0.2, 1.8), 2), False
+            ))
+            idx += 1
 
     # Insert into Database
     cursor.executemany("""

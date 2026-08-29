@@ -1,23 +1,26 @@
-# Evaluation Datasets
+# Evaluation Dataset
 
-RazorRisk reports two deliberately separate evaluation tracks.
+RazorRisk uses **one synthetic dataset as the model source of truth**. Both ML branches are trained from the same generated transaction population and are evaluated on the same held-out users/transactions.
 
-## 1. Project synthetic dataset
+## Synthetic RazorRisk dataset
 
-Used for:
+The generator creates:
 
-- user/device/IP graph construction;
-- fraud-ring and benign-look-alike scenarios;
-- GNN/community evaluation;
-- end-to-end risk-policy regression testing.
+- transaction-level behavioral features for XGBoost;
+- User/Device/IP/Merchant relationships for GraphSAGE;
+- named fraud rings;
+- benign shared-infrastructure look-alikes;
+- adversarial cases such as structuring, fan-out laundering, no-shared-infrastructure fraud, low-and-slow fraud, cold-start fraud, and account takeover.
 
-Latest reproducible run:
+Latest reproducible run (`seed=42`, 3,000 requested normal users, 30,000 requested baseline transactions): **31,048 transactions / 3,450 users** after scenario injection, including **293 fraud-labelled transactions**. The user-level split used for the current evaluation contains **21,830 training transactions / 215 fraud** and **9,218 test transactions / 78 fraud**.
 
-| Model | ROC-AUC | PR-AUC | Accuracy | Balanced Accuracy | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Tabular / XGBoost | 0.855892 | 0.637720 | 0.981179 | 0.773541 | 0.944444 | 0.548387 | 0.693878 |
-| GraphSAGE / GNN | 0.948412 | 0.696521 | 0.978670 | 0.725806 | 1.000000 | 0.451613 | 0.622222 |
-| Learned stacker | 0.938937 | 0.713269 | 0.982434 | 0.774194 | 1.000000 | 0.548387 | 0.708333 |
+| Model | ROC-AUC | PR-AUC | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|---:|
+| Tabular / XGBoost | **0.997750** | **0.951347** | 0.755102 | **0.948718** | 0.840909 |
+| GraphSAGE / GNN | **0.997178** | **0.893752** | 0.411765 | 0.897436 | 0.564516 |
+| Learned stacker | **0.998784** | **0.953931** | **0.804348** | **0.948718** | **0.870588** |
+
+The stacker is trained from paired XGBoost/GNN predictions for the same synthetic transactions, plus normalized shared-device/shared-IP evidence. It uses `class_weight="balanced"` so the rare fraud class is not overwhelmed by the majority class.
 
 Run:
 
@@ -26,43 +29,6 @@ python tests/evaluate_models.py --dataset synthetic
 python tests/evaluate_models.py --dataset synthetic --retrain
 ```
 
-These metrics describe a controlled synthetic benchmark and must not be interpreted as production fraud-detection performance.
+## External datasets
 
-## 2. ULB Credit Card Fraud Detection / Kaggle
-
-The supplied `creditcard.csv` contains:
-
-- 284,807 transactions;
-- 492 fraud transactions;
-- `Time`, `Amount`, `V1`–`V28`, and `Class`.
-
-The dataset does **not** expose stable user/device/IP identities. Therefore the external benchmark evaluates only the tabular model. RazorRisk does not fabricate graph relationships for this benchmark.
-
-### Actual run used in the README
-
-Chronological 80/20 split:
-
-- train: 227,845 rows, 417 fraud;
-- test: 56,962 rows, 75 fraud.
-
-| Metric | XGBoost |
-|---|---:|
-| ROC-AUC | **0.986233** |
-| PR-AUC | **0.792616** |
-| Accuracy | **0.999579** |
-| Balanced Accuracy | **0.873289** |
-| Precision | **0.918033** |
-| Recall | **0.746667** |
-| F1 | **0.823529** |
-| TP | 56 |
-| FP | 5 |
-| FN | 19 |
-| TN | 56,882 |
-
-Reproduce:
-
-```bash
-python tests/evaluate_models.py --dataset kaggle --csv data/creditcard.csv
-```
-
-The evaluator prints the exact train/test counts, metrics, and confusion matrix.
+The ULB/Kaggle `creditcard.csv` dataset is **not part of the RazorRisk model pipeline or evaluation contract**. Its anonymized PCA features and lack of User/Device/IP/Merchant identities do not match the project's feature and graph domain. It may be retained as a research artifact, but its metrics must not be presented as RazorRisk system metrics.
