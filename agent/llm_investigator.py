@@ -26,6 +26,7 @@ import json
 from pydantic import SecretStr
 
 from config import (
+    LLM_TIMEOUT_SECONDS,
     ANTHROPIC_API_KEY, GROQ_API_KEY, OPENAI_API_KEY,
     ANTHROPIC_MODEL, GROQ_MODEL, OPENAI_MODEL,
 )
@@ -62,19 +63,19 @@ def _build_client(provider: str):
                                 model_name=ANTHROPIC_MODEL,
                                 api_key=SecretStr(ANTHROPIC_API_KEY),
                                 temperature=0,
-                                timeout=None,
+                                timeout=LLM_TIMEOUT_SECONDS,
                                 stop=None
                             )
     if provider == "groq":
         if not GROQ_API_KEY:
             raise RuntimeError("GROQ_API_KEY is not configured.")
         from langchain_groq import ChatGroq
-        return "Groq", ChatGroq(model=GROQ_MODEL, api_key=SecretStr(GROQ_API_KEY), temperature=0)
+        return "Groq", ChatGroq(model=GROQ_MODEL, api_key=SecretStr(GROQ_API_KEY), temperature=0, timeout=LLM_TIMEOUT_SECONDS)
     if provider == "openai":
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY is not configured.")
         from langchain_openai import ChatOpenAI
-        return "OpenAI", ChatOpenAI(model=OPENAI_MODEL, api_key=SecretStr(OPENAI_API_KEY), temperature=0)
+        return "OpenAI", ChatOpenAI(model=OPENAI_MODEL, api_key=SecretStr(OPENAI_API_KEY), temperature=0, timeout=LLM_TIMEOUT_SECONDS)
     raise ValueError(f"Unknown provider '{provider}'.")
 
 
