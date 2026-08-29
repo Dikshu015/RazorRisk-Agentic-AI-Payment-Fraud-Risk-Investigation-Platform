@@ -1,0 +1,11 @@
+flowchart LR
+    API[FastAPI API] --> PM[Prometheus /metrics]
+    W1[Worker Replica 1] --> PW1[Worker Metrics :9101]
+    WN[Worker Replica N] --> PWN[Worker Metrics :9101]
+    PW1 --> PM
+    PWN --> PM
+    API --> OT[OpenTelemetry SDK]
+    W1 --> OTW[OpenTelemetry SDK]
+    OT --> COL[OTLP Collector / APM]
+    OTW --> COL
+    PM --> G[Grafana]

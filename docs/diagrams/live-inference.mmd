@@ -1,0 +1,23 @@
+%%{init: {'flowchart': {'nodeSpacing': 28, 'rankSpacing': 50}}}%%
+flowchart TB
+    TX[Incoming transaction] --> API[FastAPI score endpoint]
+    API --> TF[Transaction feature builder]
+    API --> UG[Current User-only graph]
+    TF --> X[XGBoost]
+    UG --> G[GraphSAGE GNN]
+    X --> XP[XGB probability]
+    G --> GP[GNN probability]
+    XP --> ST[Learned stacker]
+    GP --> ST
+    ST --> R[Combined model probability]
+    API --> V[Velocity] 
+    API --> S[Security signals]
+    R --> P[Risk policy + guardrails]
+    V --> P
+    S --> P
+    P --> H{HITL required?}
+    H -->|Yes| Q[Human review queue]
+    H -->|No| A[Automatic action]
+    Q --> I[Investigation / reviewer]
+    A --> AU[Audit]
+    I --> AU
