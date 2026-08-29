@@ -1,5 +1,5 @@
 import json
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from agent.graph_agent import investigation_agent
 from agent import llm_investigator, mode_state
@@ -7,6 +7,10 @@ from ml.risk_aggregator import calculate_composite_risk_score, HIGH_RISK_THRESHO
 from ml.decision_policy import apply_decision_policy
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger
+from infra.rate_limit import enforce_rate_limit
+from infra.jobs import enqueue_investigation, get_job
+from infra.redis_client import REDIS_REQUIRED
+from infra.worker import execute_job_sync
 
 logger = get_logger("api_agent")
 
@@ -67,7 +71,7 @@ def set_agent_status(req: AgentModeRequest):
     return get_agent_status()
 
 @router.post("/run/{transaction_id}")
-def run_investigation(transaction_id: str, force: bool = False):
+async def run_investigation(request: Request, transaction_id: str, force: bool = False):
     """Triggers the investigation agent (deterministic and/or LLM) on a
     specific transaction ID.
 
@@ -87,6 +91,8 @@ def run_investigation(transaction_id: str, force: bool = False):
     for a low-risk transaction out of curiosity is still one query param
     away, but it's now an explicit choice rather than the unenforced
     default."""
+    await enforce_rate_limit(request, scope="investigation-sync", limit=30)
+
     conn = get_raw_sqlite_connection()
     cursor = conn.cursor()
 
@@ -183,3 +189,70 @@ def get_investigation_report(transaction_id: str):
         "summary_report": row[6],
         "created_at": row[7]
     }
+
+
+@router.post("/enqueue/{transaction_id}", status_code=202)
+async def enqueue_investigation_job(request: Request, transaction_id: str, force: bool = False):
+    """Queue an investigation in the shared Redis queue.
+
+    Returns immediately with a durable job ID. Any API replica may accept the
+    request; any worker replica may execute it.
+    """
+    await enforce_rate_limit(request, scope="investigation-enqueue", limit=60)
+    # Validate existence before enqueueing so clients get a deterministic 404.
+    conn = get_raw_sqlite_connection()
+    try:
+        exists = conn.execute("SELECT 1 FROM transactions WHERE transaction_id = ?", (transaction_id,)).fetchone()
+    finally:
+        conn.close()
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"Transaction {transaction_id} not found.")
+    try:
+        job = await enqueue_investigation(transaction_id, force=force)
+    except Exception as exc:
+        if REDIS_REQUIRED:
+            logger.exception("Failed to enqueue investigation for %s", transaction_id)
+            raise HTTPException(status_code=503, detail="Investigation queue unavailable") from exc
+        # REDIS_REQUIRED=false means this deployment never promised a durable
+        # distributed queue (local dev, a zero-infra demo). Rather than
+        # leaving the investigation feature entirely broken when Redis isn't
+        # running, execute the exact same job logic the worker would have
+        # run (infra.worker.execute_job_sync) synchronously, inline in this
+        # request. This is explicitly a degraded, non-distributed path --
+        # "degraded_mode" in the response says so rather than silently
+        # pretending the Redis queue handled it -- and REDIS_REQUIRED=true
+        # in production still fails closed above, unchanged.
+        logger.warning(
+            "Redis unavailable and REDIS_REQUIRED=false; running investigation "
+            "for %s synchronously in-process instead of queuing it.", transaction_id
+        )
+        try:
+            result = execute_job_sync({"transaction_id": transaction_id, "force": force})
+            return {
+                "job_id": None, "transaction_id": transaction_id,
+                "status": "completed", "result": result,
+                "degraded_mode": "synchronous_no_redis",
+            }
+        except Exception as exec_exc:
+            logger.exception("Synchronous fallback investigation failed for %s", transaction_id)
+            return {
+                "job_id": None, "transaction_id": transaction_id,
+                "status": "failed", "error": str(exec_exc),
+                "degraded_mode": "synchronous_no_redis",
+            }
+    return {
+        "job_id": job["job_id"],
+        "transaction_id": transaction_id,
+        "status": job["status"],
+        "sla_deadline": job["sla_deadline"],
+        "queue": "redis",
+    }
+
+
+@router.get("/jobs/{job_id}")
+async def investigation_job_status(job_id: str):
+    """Return durable state/result for a queued investigation job."""
+    job = await get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Investigation job {job_id} not found or expired.")
+    return job
