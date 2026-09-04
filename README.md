@@ -1,6 +1,7 @@
 # RazorRisk — Agentic AI Payment Fraud & Risk Investigation Platform
 
 **Live demo:** https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/dashboard/
+**Demo video:** https://drive.google.com/file/d/1pactgyj_zuM1nKsdecU7-bIHsfQ-psuq/view?usp=drive_link
 
 > **A production-inspired AI risk prototype that combines transaction-level machine learning, graph-based fraud-community signals, calibrated score fusion, security guardrails, and human-in-the-loop investigation.**
 
@@ -1339,9 +1340,6 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
 - The PostgreSQL path has been verified by static code tracing but not yet execution-verified against a
   live PostgreSQL/Supabase instance — run the test suite and demo script once against a real instance
   before calling the migration release-verified.
-- The live hosted-LLM-provider path (Anthropic/Groq/OpenAI) hasn't been exercised in any validation pass
-  so far — only the deterministic fallback has. Run one provider-specific investigation with a real key and
-  verify timeout, malformed-JSON fallback, provider-failure fallback, and action allowlisting.
 - `ml/models/gnn_eval.json` (written by running `ml/train_gnn.py` standalone) and the `gnn_only` block in
   `ml/models/aggregator_eval.json` currently report different totals (1,035 rows vs 9,218 rows) because
   they come from different evaluation entry points — not because either file is stale or wrong. Worth a
