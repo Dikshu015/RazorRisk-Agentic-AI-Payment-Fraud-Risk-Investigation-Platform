@@ -1,7 +1,7 @@
 # RazorRisk — Agentic AI Payment Fraud & Risk Investigation Platform
 
-**Live demo:** https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/dashboard/
-**Demo video:** https://drive.google.com/file/d/1pactgyj_zuM1nKsdecU7-bIHsfQ-psuq/view?usp=drive_link
+[**Live demo:**](https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/dashboard/)
+[**Demo video:**](https://drive.google.com/file/d/1pactgyj_zuM1nKsdecU7-bIHsfQ-psuq/view?usp=drive_link)
 
 > **A production-inspired AI risk prototype that combines transaction-level machine learning, graph-based fraud-community signals, calibrated score fusion, security guardrails, and human-in-the-loop investigation.**
 
