@@ -78,10 +78,7 @@ def jev_auto_resolve_eligible(risk: dict, investigation: dict) -> bool:
     if reasons & _MANDATORY_HUMAN_REASONS:
         return False
     verification = investigation.get("jev_verification") or {}
-    return (
-        verification.get("verification_flag") == "CONSISTENT"
-        and bool(verification.get("eligible_for_auto_resolve"))
-    )
+    return bool(verification.get("eligible_for_auto_resolve"))
 
 
 def auto_resolve_review(transaction_id: str, decision_action: str, rationale: str,
