@@ -37,7 +37,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - [Hyperparameter Selection (CV)](#hyperparameter-selection-cv)
 - [Current model/data contract](#current-modeldata-contract)
 - [What the evaluation proves — and what it does not](#what-the-evaluation-proves--and-what-it-does-not)
-- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 36 numbered bugs across four phases; full write-ups in [BUGS.md](BUGS.md)
+- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 38 numbered bugs across four phases; full write-ups in [BUGS.md](BUGS.md)
 - [Testing](#testing)
 - [Tech Stack](#tech-stack)
 - [Deployment](#deployment)
@@ -1126,7 +1126,7 @@ For a short technical demo:
 - `tests/` — unit, integration, regression, contract, and evaluation tests, plus the golden fraud-scenario matrix
 - `logs/` — runtime audit/system logs (one file per subsystem, correlation-ID-traceable)
 - `README.md` — this file
-- `BUGS.md` — the full 36-bug engineering history referenced throughout this README
+- `BUGS.md` — the full 38-bug engineering history referenced throughout this README
 - `PROJECT_WORKFLOW.md` — the development process behind that history
 - `config.py`, `run.py` — configuration and local entrypoint
 - `requirements.txt`, `pyproject.toml`, `uv.lock` — Python dependencies
@@ -1397,7 +1397,7 @@ The following validation statements are retained verbatim from the pre-Jev proje
 the earlier validation state and are not the current branch's test result:
 
 ```text
-Current regression suite: **75 tests passed.**
+Current Jev-specific regression suite: **17 tests passed**. The full branch suite currently reports **95 passed, 2 known failures** in the golden matrix (account takeover and fan-out laundering); these failures are unrelated to Jev verification.
 
 The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
 distributed-production contracts.
@@ -1406,7 +1406,7 @@ Final local validation result: **75 automated tests passed**, model evaluation c
 returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
 scoring plus deterministic investigation/HITL paths were exercised.
 
-**75 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–29 and the production-hardening pass did).
+**Current Jev validation:** `17 passed` in `tests/test_jev_verifier.py`. The full suite result is `95 passed, 2 failed`; the two failures are the existing golden-matrix account-takeover and fan-out-launder cases, not Jev tests.
 
 - Automated regression coverage across `tests/*.py`, including scoring, policy, HITL, graph freshness,
   rate limiting, Jev verification, Jev/HITL triage safety, and every numbered regression in [BUGS.md](BUGS.md).
@@ -1416,6 +1416,8 @@ scoring plus deterministic investigation/HITL paths were exercised.
 ## Status
 
 **Working / verified:**
+- Jev-specific regression suite: **17 tests passed** (`pytest -q tests/test_jev_verifier.py`).
+- Full current source-package regression run: **95 passed, 2 failed**; both failures are pre-existing golden-matrix cases (`USER_ATO_1` account takeover and `USER_FANOUT_LAUNDER` fan-out laundering), not Jev verification failures.
 - Synthetic data pipeline, tabular + GNN + stacker training, and the evaluation contract are internally
   consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
   `tests/test_evaluation_contract.py` are built from) and `ml/models/hyperparameters.json` (the CV search
