@@ -358,6 +358,27 @@ access to actually connect one). That's a real gap — run `pytest` and the demo
 Postgres instance before calling the migration release-verified — but it is not the same claim as "still
 uses SQLite," and shouldn't be documented as such.
 
+### Bug #37 — Jev auto-resolution had a human-review race window
+
+The first Jev implementation selected a `PENDING` review and then updated it
+with `WHERE review_id=?`. A human could resolve that review between those two
+statements, after which the automated Jev write could overwrite the human
+decision. **Fix:** the update now includes `AND status='PENDING'` and checks
+`rowcount`; losing the race rolls back and leaves the human decision intact.
+The eligibility rule is also centralized in `api/routes_hitl.py` so the direct
+API path and Redis worker cannot drift apart.
+
+### Bug #38 — Jev trusted external response fields without validation
+
+The initial verifier indexed the TypeSafe response directly and accepted an
+arbitrary action string or non-numeric/out-of-range probability. Because the
+Jev API is an external dependency whose response contract may evolve, that
+could turn an upstream schema change into an investigation failure or an
+unsafe action comparison. **Fix:** Jev now allowlists the five supported
+actions and validates action confidence and grounding probability as finite
+0–1 values, converting malformed responses into a controlled verifier
+failure. `graph_agent.py` already treats verifier failures as non-blocking.
+
 **Still genuinely open, carried forward accurately from `BUG.md`:**
 - Live hosted-LLM-provider path (Anthropic/Groq/OpenAI) hasn't been exercised in any validation pass so
   far — only the deterministic fallback has. Run one provider-specific investigation with a real key before

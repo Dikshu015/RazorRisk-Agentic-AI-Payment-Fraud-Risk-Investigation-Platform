@@ -51,6 +51,20 @@ For the worker, set `OTEL_SERVICE_NAME=razorrisk-worker`.
 
 The FastAPI application is automatically instrumented when the OpenTelemetry packages are installed. The exporter is opt-in through `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
+## Jev verification signals
+
+Jev exposes dedicated Prometheus counters, latency, retry, disagreement, grounding, unavailable, auto-resolution, and circuit-breaker metrics. Search the agent investigation
+log for `[Jev]` entries to distinguish:
+
+- verification consistency;
+- recommended review due to action disagreement or weak hypothesis grounding;
+- unavailable/missing API key;
+- API/network/response failures.
+
+For production rollout, benchmark Jev-enabled versus Jev-disabled investigation
+latency with `tests/benchmarks/benchmark_jev.py` before treating the extra
+verification call as part of an SLA budget.
+
 ## Failure interpretation
 
 - **API errors rise + dependency failures rise:** inspect Redis/PostgreSQL/LLM dependencies.

@@ -7,6 +7,7 @@ flowchart TB
     PWN --> PM
     API --> OT[OpenTelemetry SDK]
     W1 --> OTW[OpenTelemetry SDK]
+    API --> JV[Jev Prometheus metrics<br/>latency / retries / failures / disagreement]
     OT --> COL[OTLP Collector / APM]
     OTW --> COL
     PM --> G[Grafana]

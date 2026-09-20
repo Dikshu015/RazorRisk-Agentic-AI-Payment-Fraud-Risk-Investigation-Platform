@@ -31,7 +31,7 @@ DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
 # libpq's own connect_timeout has no default, so an unreachable/firewalled
 # Postgres host (wrong DATABASE_URL, DB paused, etc.) hangs psycopg.connect()
 # on the TCP handshake indefinitely instead of raising. Since init_db() runs
-# inside the FastAPI lifespan startup — before the port is ever bound — that
+# inside the FastAPI lifespan — before the port is ever bound — that
 # hang is what stalls the whole boot on PaaS platforms. 5s is generous for
 # any real network path; a bad host now fails loudly in seconds instead of
 # silently for minutes.
@@ -66,6 +66,33 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+
+# Jev (TypeSafe AI System One model) — optional post-investigation
+# verification pass, agent/jev_verifier.py. Off (agent/mode_state.py) and
+# unconfigured by default; set TYPESAFE_API_KEY and flip the dashboard
+# toggle to enable it. Jev is a structured-decision model, not a chat LLM —
+# it returns typed answers with calibrated probabilities in well under a
+# second, so it's cheap enough to run as a per-investigation guardrail
+# rather than a sampled spot-check.
+TYPESAFE_API_KEY = os.getenv("TYPESAFE_API_KEY", "")
+TYPESAFE_API_BASE = os.getenv("TYPESAFE_API_BASE", "https://api.typesafe.ai")
+TYPESAFE_MODEL = os.getenv("TYPESAFE_MODEL", "jev-latest")
+# Jev's own docs quote 70-500ms end to end; 5s is a generous ceiling before
+# treating it as unavailable, matching LLM_TIMEOUT_SECONDS's role above.
+TYPESAFE_TIMEOUT_SECONDS = float(os.getenv("TYPESAFE_TIMEOUT_SECONDS", "5"))
+# Minimum independent_action_confidence (0-1) required, on top of action
+# agreement and a grounded hypothesis, before agent/graph_agent.py's
+# verification result is allowed to auto-resolve a pending HITL review
+# (api/routes_agent.py). Kept high on purpose — this only ever *removes*
+# a human from a queue, so it should fire on genuinely unambiguous cases.
+JEV_AUTO_RESOLVE_MIN_CONFIDENCE = float(os.getenv("JEV_AUTO_RESOLVE_MIN_CONFIDENCE", "0.85"))
+# Resilience controls for the external Jev verification dependency. These are
+# deliberately conservative: retry only transient provider failures, then
+# fail open so Jev can never block the underlying investigation.
+JEV_MAX_RETRIES = int(os.getenv("JEV_MAX_RETRIES", "2"))
+JEV_RETRY_BACKOFF_SECONDS = float(os.getenv("JEV_RETRY_BACKOFF_SECONDS", "0.25"))
+JEV_CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("JEV_CIRCUIT_FAILURE_THRESHOLD", "3"))
+JEV_CIRCUIT_RESET_SECONDS = float(os.getenv("JEV_CIRCUIT_RESET_SECONDS", "30"))
 
 # CORS: defaults to "*" so the dashboard and Vercel's static-only deployment
 # (which calls this API cross-origin, see README's Deployment section) work

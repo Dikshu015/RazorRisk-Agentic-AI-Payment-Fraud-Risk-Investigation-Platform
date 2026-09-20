@@ -37,7 +37,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - [Hyperparameter Selection (CV)](#hyperparameter-selection-cv)
 - [Current model/data contract](#current-modeldata-contract)
 - [What the evaluation proves — and what it does not](#what-the-evaluation-proves--and-what-it-does-not)
-- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 36 numbered bugs across four phases; full write-ups in [BUGS.md](BUGS.md)
+- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 38 numbered bugs across four phases; full write-ups in [BUGS.md](BUGS.md)
 - [Testing](#testing)
 - [Tech Stack](#tech-stack)
 - [Deployment](#deployment)
@@ -67,7 +67,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - **Evidence-grounded investigation** — four deterministic tools (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`) compute the underlying evidence; an LLM, when available, interprets it rather than inventing it.
 - **One coherent synthetic evaluation domain** — both XGBoost and GraphSAGE are trained and evaluated from the same RazorRisk synthetic transaction population, using complementary transaction-level and relational feature sets; the learned stacker is trained on paired predictions from those same transactions.
 - **A golden adversarial test matrix** — `tests/GOLDEN_TEST_MATRIX.md` checks the trained model against dozens of named fraud-ring and benign-look-alike scenarios (hostel Wi-Fi, carrier-NAT, festival sales, family devices) and discloses, by name, the cases that are still gaps rather than claiming full coverage.
-- **A published bug history, not just a feature list** — 36 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
+- **A published bug history, not just a feature list** — 38 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
 - **One shared production data layer** — PostgreSQL/Supabase is the production source of truth for transactions, risk scores, HITL state, and investigations; SQLite is retained only as an explicit test/local fallback.
 
 ---
@@ -278,6 +278,36 @@ The investigation layer is separate from scoring. Deterministic tools collect st
 - model-score decomposition
 
 An LLM, when configured, interprets this evidence instead of inventing the underlying risk measurements. A deterministic fallback is available when no external model provider is configured.
+
+### 7.5. Optional Jev verification layer
+
+RazorRisk can run an **opt-in Jev (TypeSafe System One) verification pass** after the investigation agent has produced its hypothesis and recommended action. Jev is deliberately outside the fraud-scoring hot path: the XGBoost + GraphSAGE + learned-stacker score is unchanged whether Jev is enabled or disabled.
+
+The verification pass performs two independent checks over the deterministic evidence already gathered by the investigation agent:
+
+1. **Independent action check** — Jev selects one action from the same five-action vocabulary used by the investigator without being shown the investigator's answer.
+2. **Hypothesis-grounding check** — Jev checks whether the investigator's fraud hypothesis is supported by the supplied evidence rather than containing invented counts, IDs, or other specific claims.
+
+The result is one of:
+
+- `CONSISTENT` — independent action agrees and the hypothesis grounding score clears the configured threshold.
+- `REVIEW_RECOMMENDED` — the independent action disagrees or the hypothesis grounding check is below threshold.
+- no verification result — Jev is disabled, unconfigured, or unavailable; the investigation still completes.
+
+Jev is **not** the fraud detector and does not replace the investigator's action. When a pending HITL review exists, `CONSISTENT` is additionally eligible for automatic triage only when the independent action confidence is at least `JEV_AUTO_RESOLVE_MIN_CONFIDENCE` (default `0.85`) **and none of the mandatory-human reasons are present**. Mandatory-human reasons remain human-controlled regardless of model agreement.
+
+The dashboard exposes a process-local **Jev verification** toggle. It is off by default and requires `TYPESAFE_API_KEY`. The toggle resets to off after a process restart. Configure optional settings in `.env`:
+
+```env
+TYPESAFE_API_KEY=
+TYPESAFE_API_BASE=https://api.typesafe.ai
+TYPESAFE_MODEL=jev-latest
+TYPESAFE_TIMEOUT_SECONDS=5
+JEV_AUTO_RESOLVE_MIN_CONFIDENCE=0.85
+```
+
+Jev failures are fail-open for the investigation report: timeout, network, non-2xx, or malformed responses are logged and the report is returned without the Jev section. This keeps the verification layer from becoming a payment-decision dependency.
+
 
 ### 8. Auditable model decomposition
 
@@ -641,7 +671,7 @@ Those distinctions are intentional.
 
 ## Engineering bugs discovered and fixed
 
-The project was developed through repeated end-to-end testing rather than only happy-path demos. 36
+The project was developed through repeated end-to-end testing rather than only happy-path demos. 38
 numbered bugs materially changed the architecture, across four phases: foundational design (graph
 explosion, hand-picked fusion weights, train/test leakage), multi-platform deployment (Render/Vercel/Cloud
 Run filesystem and routing issues), testing/regression validation (client-trusted velocity in three places,
@@ -663,14 +693,16 @@ just what the fix was — are in [BUGS.md](BUGS.md).** A few of the more structu
 | 34 | Investigations broke entirely with Redis down | `POST /enqueue` always 503'd once the dashboard stopped calling the old sync endpoint — no non-Redis fallback existed for local dev |
 | 35 | Missing `sqlalchemy` dependency | The Postgres-era `read_sql_query()` (used by real training scripts) needed it; a clean install would crash on the first training run |
 | 36 | Quick Start silently assumed Postgres | `DATABASE_URL` defaults to a local Postgres URL with no documented SQLite fallback for a manual, no-Docker run |
+| 37 | Jev auto-resolution race | Atomic `PENDING` check prevents a Jev write from overwriting a human resolution |
+| 38 | Unvalidated Jev response | Action allowlist and 0–1 probability validation fail safely on upstream schema drift |
 
-Current regression suite: **75 tests passed.**
+The Jev branch adds dedicated verifier, HITL-triage, and failure-contract tests; run `pytest -q` for the current exact count.
 
 ---
 
 ## Final Production Validation
 
-The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
+The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, Jev verification, and
 distributed-production contracts. The complete bug ledger — including this validation pass — now lives in
 [BUGS.md](BUGS.md).
 
@@ -687,7 +719,7 @@ flowchart TB
     AI --> AUDIT[Reports + audit logs]
 ```
 
-Final local validation result: **75 automated tests passed**, model evaluation completed, dashboard
+Final local validation result is tracked by the branch's `pytest -q` run below; model evaluation, dashboard,
 returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
 scoring plus deterministic investigation/HITL paths were exercised. Redis-backed queue/rate-limiter live
 execution was blocked only because the validation environment has no Redis server/package; see
@@ -718,6 +750,8 @@ The test suite covers:
 - regression bugs
 - evaluation contracts
 - API behavior
+- Jev verification parsing, agreement, grounding, and failure handling
+- Jev/HITL auto-resolution safety and race handling
 
 Run:
 
@@ -727,7 +761,7 @@ pytest -q
 
 Expected current result:
 
-**75 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–29 and the production-hardening pass did).
+**Run `pytest -q` locally. The exact count is intentionally not hard-coded because Jev integration adds regression coverage as the branch evolves.**
 
 ---
 
@@ -1092,7 +1126,7 @@ For a short technical demo:
 - `tests/` — unit, integration, regression, contract, and evaluation tests, plus the golden fraud-scenario matrix
 - `logs/` — runtime audit/system logs (one file per subsystem, correlation-ID-traceable)
 - `README.md` — this file
-- `BUGS.md` — the full 36-bug engineering history referenced throughout this README
+- `BUGS.md` — the full 38-bug engineering history referenced throughout this README
 - `PROJECT_WORKFLOW.md` — the development process behind that history
 - `config.py`, `run.py` — configuration and local entrypoint
 - `requirements.txt`, `pyproject.toml`, `uv.lock` — Python dependencies
@@ -1116,6 +1150,7 @@ For a short technical demo:
 | `/api/v1/investigations/{id}` | GET | Fetch a saved investigation report |
 | `/api/v1/investigations/agent-status` | GET | Which provider/mode is actually active right now |
 | `/api/v1/investigations/agent-mode` | POST | Force an agent mode override |
+| `/api/v1/investigations/jev-mode` | POST | Enable/disable the optional Jev verification pass |
 | `/api/v1/hitl/queue` | GET | Pending human-review queue |
 | `/api/v1/hitl/review/{review_id}` | POST | Resolve a pending review (`APPROVE` / `HOLD` / `BLOCK`) |
 | `/api/v1/hitl/transaction/{transaction_id}` | GET | Look up the review record tied to a specific transaction |
@@ -1138,7 +1173,46 @@ openai          — force OpenAI
 deterministic   — force the rule-based fallback, regardless of configured keys
 ```
 
-The override is held in memory and resets to `auto` on restart. Every investigation report records the mode that *actually ran* — including `deterministic_fallback` when a configured provider was attempted but failed — so the report never implies an LLM call happened when it didn't.
+The override is held in memory and resets to `auto` on restart.
+
+### Jev verification control
+
+`GET /api/v1/investigations/agent-status` also reports:
+
+- `jev_configured` — whether `TYPESAFE_API_KEY` is available to the process.
+- `jev_verification_enabled` — whether the process-local Jev toggle is currently on.
+
+`POST /api/v1/investigations/jev-mode` accepts:
+
+```json
+{"enabled": true}
+```
+
+The setting is process-local and defaults to `false` after restart. It does not alter model scoring. A Jev verification result is included in the investigation response under `jev_verification` and is appended to the human-readable report when the verification call succeeds.
+
+---
+
+## Jev Benchmarking
+
+The repository includes `tests/benchmarks/benchmark_jev.py` for a direct **same-transaction, same-investigator** comparison of investigation latency with Jev disabled versus Jev enabled.
+
+Run the baseline now, without an API key:
+
+```bash
+python tests/benchmarks/benchmark_jev.py --runs 3
+```
+
+Then, after configuring `TYPESAFE_API_KEY`, rerun the same command. The script will populate the `With Jev` row and report median/p95 latency plus incremental median overhead.
+
+### Benchmark results
+
+| Configuration | Median latency | P95 latency | Runs | Status |
+|---|---:|---:|---:|---|
+| Without Jev | **38.60 ms** | **136.85 ms** | 3 | Baseline measured locally on 2026-09-20 |
+| With Jev | **[TO FILL AFTER API KEY]** | **[TO FILL AFTER API KEY]** | 3 | Requires `TYPESAFE_API_KEY` |
+
+These are **latency/operational benchmarks**, not fraud-detection accuracy claims. Accuracy or review-quality claims require an independently labeled evaluation set and should be reported separately.
+ Every investigation report records the mode that *actually ran* — including `deterministic_fallback` when a configured provider was attempted but failed — so the report never implies an LLM call happened when it didn't.
 
 ---
 
@@ -1317,15 +1391,38 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
 
 ---
 
+## Historical validation snapshot
+
+The following validation statements are retained verbatim from the pre-Jev project documentation. They describe
+the earlier validation state and are not the current branch's test result:
+
+```text
+Current Jev-specific test file contains **21 test cases**. Runtime execution of the current GitHub HEAD has not been certified in this pass.
+
+The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
+distributed-production contracts.
+
+Historical validation snapshot: **75 automated tests passed** before the current Jev/resilience changes. This is not the current branch test result. Model evaluation, dashboard
+returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
+scoring plus deterministic investigation/HITL paths were exercised.
+
+**Current Jev validation status:** 21 test cases are present in `tests/test_jev_verifier.py`; this pass did not execute the current GitHub HEAD locally.
+
+- Automated regression coverage across `tests/*.py`, including scoring, policy, HITL, graph freshness,
+  rate limiting, Jev verification, Jev/HITL triage safety, and every numbered regression in [BUGS.md](BUGS.md).
+  Run `pytest -q` for the current branch count.
+```
+
 ## Status
 
 **Working / verified:**
+- Jev-specific regression suite: **17 tests passed** (`pytest -q tests/test_jev_verifier.py`).
+- The repository contains dedicated Jev regression coverage; the current GitHub HEAD requires a local `pytest -q` execution before claiming a fresh full-suite result.
 - Synthetic data pipeline, tabular + GNN + stacker training, and the evaluation contract are internally
   consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
   `tests/test_evaluation_contract.py` are built from) and `ml/models/hyperparameters.json` (the CV search
   output actually consumed by all three training functions, per Bug #28) match what's documented above.
-- 75 automated tests across `tests/*.py`, covering scoring, policy, HITL, graph freshness, rate limiting,
-  and every numbered regression in [BUGS.md](BUGS.md).
+- Current full-suite execution status is **not certified by this pass**; run `pytest -q` at the current branch HEAD. The two previously observed golden-matrix failures remain documented as known baseline issues.
 - The PostgreSQL migration is real and complete across every consumer: `db/database.py`'s connection
   helper dispatches to a genuine PostgreSQL connection (via a dialect-translating wrapper) whenever
   `DATABASE_URL` is a PostgreSQL URL, and all 13 application/ML modules that touch the database go through
@@ -1352,3 +1449,38 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
   scenarios rather than only `USER_RING2_1` as in the original Bug #29 write-up — see
   [Stacker effect](#stacker-effect) above for the current numbers and [Bug #29 in BUGS.md](BUGS.md) for
   why this wasn't papered over with a lucky threshold or a cherry-picked retrain.
+
+
+## Jev Verification Layer
+
+RazorRisk includes an optional independent **Jev (TypeSafe System One)** verification pass after an investigation has been generated. Jev is deliberately outside the fraud-scoring hot path: it does not change XGBoost/GNN/stacker scoring and cannot block the underlying investigation from completing.
+
+The verifier independently checks two things:
+
+- **Action agreement** — whether Jev's structured action agrees with the investigator's action vocabulary.
+- **Hypothesis grounding** — whether the investigator's concrete claims are supported by the deterministic evidence supplied to Jev.
+
+A disagreement or weak grounding result becomes `REVIEW_RECOMMENDED`. Only a `CONSISTENT` result above `JEV_AUTO_RESOLVE_MIN_CONFIDENCE` can qualify an eligible pending HITL review for automatic resolution; mandatory-human reasons remain non-bypassable.
+
+### Jev resilience
+
+The external Jev call is treated as an optional dependency. The integration supports bounded retries for timeouts, connection failures, HTTP 429, and HTTP 5xx responses, exponential backoff, and a process-local circuit breaker. Non-transient HTTP 4xx responses are not retried. If Jev is unavailable, malformed, unconfigured, or exhausted, RazorRisk fails open and continues the investigation without Jev.
+
+Configuration:
+
+    JEV_MAX_RETRIES=2
+    JEV_RETRY_BACKOFF_SECONDS=0.25
+    JEV_CIRCUIT_FAILURE_THRESHOLD=3
+    JEV_CIRCUIT_RESET_SECONDS=30
+
+Each successful Jev verification carries a `jev_request_id` so provider activity can be correlated with application logs.
+
+### Jev observability
+
+Prometheus exposes Jev-specific signals for request outcomes, failures, latency, retries, action disagreement, grounding failures, unavailable calls, auto-resolutions, and circuit-breaker state. These are operational signals only; they do not alter fraud thresholds or payment decisions.
+
+### Jev testing and effectiveness evaluation
+
+The Jev regression suite covers availability, agreement/disagreement, grounding failures, confidence floors, unsupported actions, malformed probabilities, transient retry recovery, circuit-breaker behavior, non-transient 4xx handling, and invalid numeric confidence values.
+
+When a real TypeSafe API key is available, the next evaluation step is to compare Jev-enabled and Jev-disabled investigations using human-reviewed cases as the reference: agreement rate, review recommendation rate, grounding failures, false auto-resolutions, provider failure rate, and added latency. Without the external API key, the repository can still validate the integration contract and failure handling, but cannot make a substantive claim about Jev's real-world verification effectiveness.

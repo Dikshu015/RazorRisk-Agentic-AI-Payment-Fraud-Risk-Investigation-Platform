@@ -21,4 +21,10 @@ flowchart TB
     HITL --> REV[Human reviewer]
     OUT --> AUD[Audit trail]
     REV --> AUD
+
+    %% Jev is intentionally outside the scoring hot path:
+    %% it runs only after an investigation is requested.
+    POL -.->|investigation trigger| INV[Investigation agent]
+    INV --> JEV[Jev verification<br/>optional post-investigation<br/>retry + circuit breaker]
+    JEV -.-> HITL2[HITL / Jev auto-triage]
     

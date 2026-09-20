@@ -86,11 +86,26 @@ if PROMETHEUS_AVAILABLE:
         "External dependency failures.",
         ["dependency"],
     )
+    JEV_REQUESTS = Counter("razorrisk_jev_requests_total", "Jev verification calls by outcome.", ["outcome"])
+    JEV_FAILURES = Counter("razorrisk_jev_failures_total", "Jev verification failures by reason.", ["reason"])
+    JEV_CONSISTENT = Counter("razorrisk_jev_consistent_total", "Successful Jev results classified as CONSISTENT.")
+    JEV_REVIEW_RECOMMENDED = Counter("razorrisk_jev_review_recommended_total", "Successful Jev results classified as REVIEW_RECOMMENDED.")
+    JEV_UNAVAILABLE = Counter("razorrisk_jev_unavailable_total", "Jev verification requests skipped because unavailable or unconfigured.")
+    JEV_AUTO_RESOLVED = Counter("razorrisk_jev_auto_resolved_total", "HITL reviews actually auto-resolved after Jev eligibility checks.")
+    JEV_LATENCY = Histogram("razorrisk_jev_latency_seconds", "End-to-end Jev verification latency in seconds.", buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
+    JEV_ACTION_DISAGREEMENTS = Counter("razorrisk_jev_action_disagreement_total", "Jev action choices that disagree with the investigator.")
+    JEV_GROUNDING_FAILURES = Counter("razorrisk_jev_grounding_failure_total", "Jev hypothesis-grounding checks below threshold.")
+    JEV_RETRIES = Counter("razorrisk_jev_retries_total", "Retries attempted for transient Jev provider failures.")
+    JEV_CIRCUIT_OPEN = Gauge("razorrisk_jev_circuit_open", "Whether the local Jev circuit breaker is open (1) or closed (0).")
 else:
     HTTP_REQUESTS = HTTP_LATENCY = HTTP_IN_FLIGHT = None
     SCORE_TOTAL = SCORE_LATENCY = None
     INVESTIGATION_TOTAL = INVESTIGATION_LATENCY = INVESTIGATION_QUEUE_DEPTH = None
     INVESTIGATION_RETRIES = RATE_LIMIT_HITS = DEPENDENCY_FAILURES = None
+    JEV_REQUESTS = JEV_FAILURES = JEV_CONSISTENT = JEV_REVIEW_RECOMMENDED = None
+    JEV_UNAVAILABLE = JEV_AUTO_RESOLVED = JEV_LATENCY = None
+    JEV_ACTION_DISAGREEMENTS = JEV_GROUNDING_FAILURES = JEV_RETRIES = None
+    JEV_CIRCUIT_OPEN = None
 
 
 def setup_tracing() -> None:

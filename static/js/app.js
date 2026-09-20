@@ -340,6 +340,15 @@ function renderAgentReport(agentRes) {
     // just the general "what would run next" status — so the badge never
     // implies more than the report it's sitting next to actually did.
     setAgentBadge(agentRes.agent_mode_label || agentRes.agent_mode, agentRes.agent_mode);
+
+    // Reflect what actually ran for this report, not just the current toggle.
+    if (agentRes.jev_verification) {
+        const jv = agentRes.jev_verification;
+        const label = jv.verification_flag === 'CONSISTENT'
+            ? `Consistent (${Math.round(jv.independent_action_confidence * 100)}%)`
+            : 'Review recommended';
+        setJevBadge(label, jv.verification_flag);
+    }
 }
 
 // Agent Mode Controls (Groq / Anthropic / OpenAI / deterministic-only)
@@ -351,6 +360,33 @@ function setAgentBadge(label, modeKey) {
     if (modeKey && modeKey.indexOf('deterministic') !== -1) {
         badge.classList.add('status-deterministic');
     }
+}
+
+// Jev Verification Controls (TypeSafe System One post-investigation check)
+function setJevBadge(label, flag) {
+    const badge = document.getElementById('jev-status-badge');
+    if (!badge) return;
+    badge.innerText = label;
+    badge.className = 'agent-status-badge';
+    if (flag === 'REVIEW_RECOMMENDED') badge.classList.add('status-error');
+    if (flag === 'off') badge.classList.add('status-deterministic');
+}
+
+function setJevMode(enabled) {
+    const toggle = document.getElementById('jev-toggle');
+    if (toggle) toggle.disabled = true;
+    fetch(`${API_BASE}/api/v1/investigations/jev-mode`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+    }).then(res => res.json()).then(data => {
+        setJevBadge(data.jev_verification_enabled ? 'On' : 'Off', data.jev_verification_enabled ? null : 'off');
+    }).catch(err => {
+        console.error("Jev mode change error:", err);
+        alert("Couldn't change Jev verification mode: " + err.message);
+        loadAgentStatus();
+    }).finally(() => {
+        if (toggle) toggle.disabled = !window.__jevConfigured;
+    });
 }
 
 function loadAgentStatus() {
@@ -370,6 +406,17 @@ function loadAgentStatus() {
                 });
             }
             setAgentBadge(data.active_label, data.active_provider || 'deterministic');
+
+            window.__jevConfigured = !!data.jev_configured;
+            const jevToggle = document.getElementById('jev-toggle');
+            if (jevToggle) {
+                jevToggle.checked = !!data.jev_verification_enabled;
+                jevToggle.disabled = !data.jev_configured;
+            }
+            setJevBadge(
+                !data.jev_configured ? 'No API key' : (data.jev_verification_enabled ? 'On' : 'Off'),
+                !data.jev_configured ? 'off' : null
+            );
         })
         .catch(err => {
             console.error("Agent status fetch error:", err);

@@ -24,7 +24,9 @@ flowchart TB
     subgraph Investigation[Investigation and Resolution]
         EVID[Deterministic evidence tools]
         LLM[Optional LLM investigation]
+        JEV[Optional Jev verification<br/>retry + circuit breaker]
         HITL[Human review queue]
+        AUTO[Jev auto-triage<br/>eligible cases only]
     end
 
     UI <--> API
@@ -45,7 +47,11 @@ flowchart TB
     POLICY --> EVID
     POLICY -->|"only if mandatory-human<br/>reason, or confidence < 0.95"| HITL
     EVID --> LLM
-    LLM --> HITL
+    LLM --> JEV
+    JEV -->|REVIEW_RECOMMENDED| HITL
+    JEV -->|CONSISTENT + eligible| AUTO
+    AUTO --> AUDIT
+    JEV --> AUDIT
     API --> AUDIT
     EVID --> AUDIT
     HITL --> AUDIT

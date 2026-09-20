@@ -246,6 +246,10 @@
                                 <option value="auto">Loading…</option>
                             </select>
                             <span id="agent-status-badge" class="agent-status-badge">Checking…</span>
+
+                            <label for="jev-toggle" class="agent-mode-label">Jev verification</label>
+                            <input type="checkbox" id="jev-toggle" onchange="setJevMode(this.checked)" disabled>
+                            <span id="jev-status-badge" class="agent-status-badge">Checking…</span>
                         </div>
                     </div>
                     <div id="agent-report-container" class="markdown-report-box">

@@ -20,12 +20,14 @@ actually did.
 """
 import uuid
 import datetime
+import time
 
 from agent.tools import GraphTool, TransactionHistoryTool, DeviceRiskTool, FraudModelTool
 from agent.deterministic_agent import determine_fraud_hypothesis
-from agent import llm_investigator, mode_state
+from agent import llm_investigator, jev_verifier, mode_state
 from agent.prompts import REPORT_TEMPLATE
 from utils.logger import get_logger
+from infra import observability
 
 logger = get_logger("graph_agent")
 
@@ -87,6 +89,32 @@ class RiskInvestigationAgent:
                 txn_payload, graph_evidence, history_evidence, device_evidence, velocity_1h
             )
 
+        # Step 2.5: optional Jev (TypeSafe) verification pass. Toggled from
+        # the dashboard (agent/mode_state.py), off by default. Runs against
+        # whichever hypothesis/rec_action was just produced above, LLM or
+        # deterministic — see agent/jev_verifier.py's module docstring for
+        # what it checks and why. Never blocks report generation: any
+        # failure (no key, network, bad response) is logged and the report
+        # goes out exactly as it would have without this step.
+        jev_verification = None
+        if mode_state.get_jev_verification_enabled():
+            if jev_verifier.is_available():
+                try:
+                    jev_started = time.perf_counter()
+                    jev_verification = jev_verifier.verify_investigation(
+                        txn_payload, risk_summary, evidence, hypothesis, rec_action
+                    )
+                    if observability.JEV_LATENCY is not None:
+                        observability.JEV_LATENCY.observe(time.perf_counter() - jev_started)
+                except Exception as e:
+                    if observability.JEV_REQUESTS is not None:
+                        observability.JEV_REQUESTS.labels(outcome="failure").inc()
+                    if observability.JEV_LATENCY is not None:
+                        observability.JEV_LATENCY.observe(time.perf_counter() - jev_started)
+                    logger.warning(f"Jev verification failed ({e}) — continuing without it.")
+            else:
+                logger.info("Jev verification requested but TYPESAFE_API_KEY not configured — skipping.")
+
         # Step 3: build the report — same template regardless of mode
         graph_summary = (
             f"{graph_evidence['shared_device_account_count']} accounts linked to same device, "
@@ -120,6 +148,22 @@ class RiskInvestigationAgent:
             action_rationale=rationale,
         )
 
+        # Appended (not part of REPORT_TEMPLATE's own format() call) so this
+        # stays optional without changing that template's required keys —
+        # the deterministic path and any other caller of REPORT_TEMPLATE
+        # keep working unchanged whether or not Jev ran.
+        if jev_verification is not None:
+            flag = jev_verification["verification_flag"]
+            summary_report += (
+                f"\n\n---\n\n#### Jev Verification ({jev_verification['jev_model']})\n"
+                f"**Status**: {flag}\n"
+                f"- Independent action pick: {jev_verification['independent_action']} "
+                f"(confidence: {jev_verification['independent_action_confidence']:.0%}, "
+                f"agrees with investigator: {jev_verification['actions_agree']})\n"
+                f"- Hypothesis grounding: {jev_verification['hypothesis_grounded_probability']:.0%} "
+                f"(threshold: {jev_verifier.GROUNDING_THRESHOLD:.0%})\n"
+            )
+
         investigation_result = {
             "investigation_id": f"INV_{uuid.uuid4().hex[:8]}",
             "transaction_id": txn_id,
@@ -131,6 +175,7 @@ class RiskInvestigationAgent:
             "fraud_hypothesis": hypothesis,
             "recommended_action": rec_action,
             "summary_report": summary_report,
+            "jev_verification": jev_verification,
             "created_at": datetime.datetime.now().isoformat(),
         }
         logger.info(f"========== Investigation complete for Txn: {txn_id} | Mode: {agent_mode} | Action: {rec_action} ==========")

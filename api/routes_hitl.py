@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger
+from infra import observability
 
 router = APIRouter(prefix="/api/v1/hitl", tags=["Human-in-the-Loop"])
 logger = get_logger("hitl")
@@ -49,6 +50,59 @@ def enqueue_review(transaction_id: str, risk: dict):
     conn.close()
     logger.info("HITL review queued: %s txn=%s", review_id, transaction_id)
     return review_id
+
+# Maps the investigator's five-action vocabulary onto human_reviews' decision enum.
+_ACTION_TO_HITL_DECISION = {
+    "BLOCK_ACCOUNT_AND_HOLD_FUNDS": "BLOCK",
+    "TEMPORARY_VELOCITY_FREEZE": "HOLD",
+    "HOLD_FOR_MANUAL_REVIEW": "HOLD",
+    "REQUIRE_TWO_FACTOR_AUTHENTICATION": "HOLD",
+    "APPROVE_WITH_VERIFICATION": "APPROVE",
+}
+
+
+def auto_resolve_review(transaction_id: str, decision_action: str, rationale: str,
+                         resolved_by: str = "jev_auto_triage") -> str | None:
+    """Auto-resolves the latest PENDING human review for this transaction."""
+    conn = get_raw_sqlite_connection()
+    row = conn.execute(
+        "SELECT review_id FROM human_reviews WHERE transaction_id = ? AND status = 'PENDING' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (transaction_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    review_id = row[0]
+    mapped_decision = _ACTION_TO_HITL_DECISION.get(decision_action, "HOLD")
+    now = datetime.datetime.now().isoformat()
+    cursor = conn.execute(
+        """UPDATE human_reviews
+           SET status='RESOLVED', reviewer=?, reviewer_decision=?,
+               reviewer_rationale=?, reviewed_at=?
+           WHERE review_id=? AND status='PENDING'""",
+        (resolved_by, mapped_decision, rationale, now, review_id),
+    )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        conn.close()
+        logger.info("HITL auto-resolve lost race for review=%s txn=%s; leaving human decision untouched.", review_id, transaction_id)
+        return None
+    conn.execute(
+        "UPDATE risk_scores SET decision=? WHERE transaction_id=?",
+        (mapped_decision, transaction_id),
+    )
+    conn.commit()
+    conn.close()
+    if observability.JEV_AUTO_RESOLVED is not None:
+        observability.JEV_AUTO_RESOLVED.inc()
+    logger.info(
+        "HITL auto-resolved by %s: review=%s txn=%s decision=%s (source action=%s)",
+        resolved_by, review_id, transaction_id, mapped_decision, decision_action,
+    )
+    return review_id
+
 
 @router.get("/queue")
 def get_review_queue(limit: int = 50):

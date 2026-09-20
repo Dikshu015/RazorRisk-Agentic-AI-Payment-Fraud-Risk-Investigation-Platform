@@ -1,4 +1,5 @@
 ---
+- Optional Jev verification runs after investigation, outside the fraud-scoring hot path. It independently checks the investigator action and hypothesis grounding and can auto-resolve eligible non-mandatory HITL cases only when the configured confidence floor is met.
 title: RazorRisk — Agentic Fraud Investigation Platform
 emoji: 🕸️
 colorFrom: red

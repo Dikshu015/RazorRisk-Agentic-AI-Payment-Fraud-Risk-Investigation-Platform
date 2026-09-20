@@ -28,3 +28,21 @@ def set_mode(mode: str) -> str:
     global _current_mode
     _current_mode = mode
     return _current_mode
+
+
+# Jev (TypeSafe) verification toggle. Off by default: it's a real API call
+# with its own key requirement (config.TYPESAFE_API_KEY), not something
+# that should silently start firing just because a key happens to be set.
+# Same process-local, in-memory, not-persisted contract as _current_mode
+# above — restarting the server resets it to off.
+_jev_verification_enabled = False
+
+
+def get_jev_verification_enabled() -> bool:
+    return _jev_verification_enabled
+
+
+def set_jev_verification_enabled(enabled: bool) -> bool:
+    global _jev_verification_enabled
+    _jev_verification_enabled = bool(enabled)
+    return _jev_verification_enabled
