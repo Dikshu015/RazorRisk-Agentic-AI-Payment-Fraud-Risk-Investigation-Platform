@@ -24,7 +24,16 @@ flowchart TB
     TIER -->|CRITICAL| BPR[BLOCK_PENDING_REVIEW]
     R --> Q[HITL queue]
     Q --> HR[Human reviewer]
+    Q --> I[Investigation agent]
+    I --> J[Jev verification<br/>optional]
+    J --> JV{Consistent + grounded<br/>+ confidence floor?}
+    JV -->|No| HR
+    JV -->|Yes| MH{Mandatory-human reason?}
+    MH -->|Yes| HR
+    MH -->|No| AR[Jev auto-resolve<br/>pending review]
+    I -->|Disabled / unavailable| HR
     HR --> D[Final reviewer decision]
+    AR --> D
     A --> AU[Audit trail]
     MON --> AU
     HOLD --> AU
