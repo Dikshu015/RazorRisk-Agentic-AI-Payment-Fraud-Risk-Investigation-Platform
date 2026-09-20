@@ -27,6 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshLogStream();
     initVelocitySourceToggle();
     initInfoBubbles();
+    loadGraphCommunities();
+    updateRiskDistributionChart();
 
     // Form submit listener
     const form = document.getElementById('scoring-form');
@@ -50,6 +52,8 @@ function initTabs() {
             if (tabId === 'graph') {
                 const userId = document.getElementById('user_id').value || 'USER_RING1_1';
                 renderGraphTopology(userId);
+                loadGraphCommunities();
+                updateRiskDistributionChart();
             } else if (tabId === 'logs') {
                 refreshLogStream();
             } else if (tabId === 'transactions') {
@@ -596,4 +600,109 @@ async function resolveHITL(reviewId, decision) {
         body: JSON.stringify({decision, reviewer: "dashboard-reviewer", rationale})
     });
     await loadHITLQueue();
+}
+
+
+/* ===== API-backed dashboard intelligence ===== */
+async function apiJson(url, options = {}) {
+    const res = await fetch(url, options);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `Request failed (HTTP ${res.status})`);
+    return body;
+}
+
+async function rebuildGraph() {
+    const status = document.getElementById('community-summary');
+    if (status) status.textContent = 'Rebuilding graph and communities…';
+    try {
+        const data = await apiJson(`${API_BASE}/api/v1/admin/rebuild-graph`, { method: 'POST' });
+        if (status) status.textContent = `Graph rebuilt · ${data.nodes.toLocaleString()} nodes · ${data.edges.toLocaleString()} edges · ${data.users_with_community.toLocaleString()} users classified`;
+        const userId = document.getElementById('user_id').value || 'USER_RING1_1';
+        await renderGraphTopology(userId);
+        await loadGraphCommunities();
+    } catch (err) {
+        if (status) status.textContent = `Graph rebuild failed: ${err.message}`;
+        logClientError(err.message, 'rebuildGraph');
+    }
+}
+
+async function loadGraphCommunities() {
+    const summary = document.getElementById('community-summary');
+    const list = document.getElementById('community-list');
+    if (!summary || !list) return;
+    try {
+        const data = await apiJson(`${API_BASE}/api/v1/graph/communities`);
+        summary.textContent = `${data.total_communities.toLocaleString()} communities detected · top 15 shown`;
+        list.innerHTML = (data.clusters || []).map(c => {
+            const pct = Math.min(100, Number(c.fraud_ratio || 0) * 100);
+            return `<div class="community-row">
+                <div><strong>#${escapeHtml(c.community_id)}</strong><span>${Number(c.size).toLocaleString()} users</span></div>
+                <div class="community-meter"><i style="width:${pct}%"></i></div>
+                <b>${pct.toFixed(1)}% fraud</b>
+            </div>`;
+        }).join('') || '<div class="placeholder-msg">No communities available.</div>';
+    } catch (err) {
+        summary.textContent = `Community API unavailable: ${err.message}`;
+        list.innerHTML = '';
+    }
+}
+
+async function updateRiskDistributionChart() {
+    const canvas = document.getElementById('risk-distribution-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    try {
+        const data = await apiJson(`${API_BASE}/api/v1/transactions/recent?limit=100`);
+        const counts = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
+        (data.transactions || []).forEach(t => {
+            const tier = String(t.risk_tier || '').toUpperCase();
+            if (counts[tier] !== undefined) counts[tier]++;
+        });
+        if (window.__riskDistributionChart) window.__riskDistributionChart.destroy();
+        window.__riskDistributionChart = new Chart(canvas, {
+            type: 'doughnut',
+            data: {
+                labels: ['Low', 'Medium', 'High', 'Critical'],
+                datasets: [{ data: Object.values(counts), backgroundColor: ['#42D3A2','#E4B94F','#FF914D','#FF5D6C'], borderWidth: 0 }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom', labels: { color: '#9AA8BA', boxWidth: 10, usePointStyle: true } } }
+            }
+        });
+    } catch (err) {
+        logClientError(err.message, 'riskDistributionChart');
+    }
+}
+
+async function loadInvestigationReport() {
+    const txId = document.getElementById('investigation-transaction-id')?.value.trim();
+    const status = document.getElementById('investigation-history-status');
+    if (!txId) { if (status) status.textContent = 'Enter a transaction ID first.'; return; }
+    try {
+        const data = await apiJson(`${API_BASE}/api/v1/investigations/${encodeURIComponent(txId)}`);
+        renderAgentReport(data);
+        if (status) status.textContent = `Loaded investigation ${txId} · created ${data.created_at || 'unknown'}`;
+    } catch (err) {
+        if (status) status.textContent = `Could not load report: ${err.message}`;
+    }
+}
+
+async function runSynchronousInvestigation() {
+    const txId = document.getElementById('investigation-transaction-id')?.value.trim() ||
+        document.getElementById('user_id')?.value.trim();
+    const status = document.getElementById('investigation-history-status');
+    if (!txId) { if (status) status.textContent = 'Enter a transaction ID first.'; return; }
+    if (status) status.textContent = 'Running direct investigation…';
+    try {
+        const data = await apiJson(`${API_BASE}/api/v1/investigations/run/${encodeURIComponent(txId)}?force=true`, { method: 'POST' });
+        if (data.investigation_skipped) {
+            if (status) status.textContent = data.reason;
+            return;
+        }
+        renderAgentReport(data);
+        if (status) status.textContent = `Investigation completed · ${data.investigation_id || txId}`;
+    } catch (err) {
+        if (status) status.textContent = `Investigation failed: ${err.message}`;
+    }
 }
