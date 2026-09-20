@@ -338,6 +338,21 @@ Bugs #14–30 (found during manual and automated validation, after the architect
 are documented in full in **[BUGS.md § Phase 3](BUGS.md#phase-3--testing--regression-validation-bugs-1430)**,
 including two disclosed, still-open detection gaps from Bug #29 and the Bug #30 new-user auto-block fix.
 
+## 4.6 Jev Verification Layer
+
+Jev is an optional post-investigation verification layer. It does not participate in XGBoost/GNN scoring, stacker calibration, or the primary risk decision.
+
+The execution order is:
+
+1. deterministic evidence tools gather graph, history, device, and model evidence;
+2. the configured LLM investigator or deterministic fallback produces the hypothesis and recommended action;
+3. if the Jev toggle is enabled and `TYPESAFE_API_KEY` is configured, Jev independently checks the recommended action and checks whether the hypothesis is grounded in the evidence;
+4. `CONSISTENT` requires action agreement and grounding above the configured threshold;
+5. a pending HITL review may be auto-resolved only when Jev confidence clears `JEV_AUTO_RESOLVE_MIN_CONFIDENCE` and no `MANDATORY_HUMAN_REASONS` apply;
+6. disagreement, weak grounding, unavailable Jev, malformed responses, or mandatory-human reasons leave the human-review path intact.
+
+The implementation is intentionally fail-open for report generation: a Jev dependency failure is logged and does not prevent the underlying investigation report from being returned.
+
 ## 5. Deep-Dive Component Map
 
 ### A. Database Layer (`db/`)
