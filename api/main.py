@@ -412,10 +412,7 @@ def root():
 # Prometheus metrics
 # ---------------------------------------------------------------------------
 
-@app.get(
-    "/metrics",
-    include_in_schema=False,
-)
+@app.get("/metrics", include_in_schema=False)
 def metrics():
     """
     Prometheus scrape endpoint.
