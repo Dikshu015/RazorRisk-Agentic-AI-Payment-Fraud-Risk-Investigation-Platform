@@ -1397,16 +1397,16 @@ The following validation statements are retained verbatim from the pre-Jev proje
 the earlier validation state and are not the current branch's test result:
 
 ```text
-Current Jev-specific regression suite: **17 tests passed**. The full branch suite currently reports **95 passed, 2 known failures** in the golden matrix (account takeover and fan-out laundering); these failures are unrelated to Jev verification.
+Current Jev-specific test file contains **21 test cases**. Runtime execution of the current GitHub HEAD has not been certified in this pass.
 
 The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
 distributed-production contracts.
 
-Final local validation result: **75 automated tests passed**, model evaluation completed, dashboard
+Historical validation snapshot: **75 automated tests passed** before the current Jev/resilience changes. This is not the current branch test result. Model evaluation, dashboard
 returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
 scoring plus deterministic investigation/HITL paths were exercised.
 
-**Current Jev validation:** `17 passed` in `tests/test_jev_verifier.py`. The full suite result is `95 passed, 2 failed`; the two failures are the existing golden-matrix account-takeover and fan-out-launder cases, not Jev tests.
+**Current Jev validation status:** 21 test cases are present in `tests/test_jev_verifier.py`; this pass did not execute the current GitHub HEAD locally.
 
 - Automated regression coverage across `tests/*.py`, including scoring, policy, HITL, graph freshness,
   rate limiting, Jev verification, Jev/HITL triage safety, and every numbered regression in [BUGS.md](BUGS.md).
@@ -1417,12 +1417,12 @@ scoring plus deterministic investigation/HITL paths were exercised.
 
 **Working / verified:**
 - Jev-specific regression suite: **17 tests passed** (`pytest -q tests/test_jev_verifier.py`).
-- Full current source-package regression run: **95 passed, 2 failed**; both failures are pre-existing golden-matrix cases (`USER_ATO_1` account takeover and `USER_FANOUT_LAUNDER` fan-out laundering), not Jev verification failures.
+- The repository contains dedicated Jev regression coverage; the current GitHub HEAD requires a local `pytest -q` execution before claiming a fresh full-suite result.
 - Synthetic data pipeline, tabular + GNN + stacker training, and the evaluation contract are internally
   consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
   `tests/test_evaluation_contract.py` are built from) and `ml/models/hyperparameters.json` (the CV search
   output actually consumed by all three training functions, per Bug #28) match what's documented above.
-- Current full-suite validation: **95 passed, 2 failed**; the two failures are the disclosed golden-matrix account-takeover and fan-out-launder cases, while the Jev-specific suite has **17 passed**.
+- Current full-suite execution status is **not certified by this pass**; run `pytest -q` at the current branch HEAD. The two previously observed golden-matrix failures remain documented as known baseline issues.
 - The PostgreSQL migration is real and complete across every consumer: `db/database.py`'s connection
   helper dispatches to a genuine PostgreSQL connection (via a dialect-translating wrapper) whenever
   `DATABASE_URL` is a PostgreSQL URL, and all 13 application/ML modules that touch the database go through
