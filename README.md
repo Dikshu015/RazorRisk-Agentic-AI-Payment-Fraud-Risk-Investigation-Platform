@@ -771,6 +771,17 @@ Expected current result:
 
 RazorRisk now has a repository-level GitHub Actions pipeline.
 
+### Supabase PostgreSQL integration
+
+The CI pipeline also includes a live Supabase PostgreSQL smoke test on trusted pushes to `main`. It uses the repository secret `SUPABASE_DATABASE_URL` and verifies:
+
+1. the connection succeeds;
+2. the database is PostgreSQL;
+3. all required RazorRisk tables exist;
+4. basic read/write transaction behavior works inside a temporary table.
+
+The Supabase credential is **not stored in the repository**. Pull requests from forks intentionally skip this live integration because GitHub does not expose repository secrets to untrusted fork workflows.
+
 ### Continuous integration
 
 On pushes to `main` and CI branches, and on pull requests targeting `main`, CI:
