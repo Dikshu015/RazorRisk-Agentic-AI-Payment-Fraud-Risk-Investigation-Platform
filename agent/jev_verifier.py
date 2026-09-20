@@ -57,6 +57,7 @@ file if a field name here changes upstream.
 import requests
 import time
 import uuid
+import threading
 
 from config import (
     TYPESAFE_API_KEY, TYPESAFE_MODEL, TYPESAFE_API_BASE, TYPESAFE_TIMEOUT_SECONDS,
@@ -80,33 +81,39 @@ ACTION_CRITERIA = {
 GROUNDING_THRESHOLD = 0.5
 SUPPORTED_ACTIONS = frozenset(ACTION_CRITERIA)
 
+_CIRCUIT_LOCK = threading.Lock()
 _CIRCUIT_FAILURES = 0
 _CIRCUIT_OPENED_AT = 0.0
 
 def reset_circuit_breaker():
     global _CIRCUIT_FAILURES, _CIRCUIT_OPENED_AT
-    _CIRCUIT_FAILURES = 0; _CIRCUIT_OPENED_AT = 0.0
-    if observability.JEV_CIRCUIT_OPEN is not None: observability.JEV_CIRCUIT_OPEN.set(0)
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILURES = 0
+        _CIRCUIT_OPENED_AT = 0.0
+        if observability.JEV_CIRCUIT_OPEN is not None:
+            observability.JEV_CIRCUIT_OPEN.set(0)
 
 def _circuit_open():
     global _CIRCUIT_FAILURES, _CIRCUIT_OPENED_AT
-    if _CIRCUIT_OPENED_AT and time.monotonic() - _CIRCUIT_OPENED_AT >= JEV_CIRCUIT_RESET_SECONDS: reset_circuit_breaker()
-    return bool(_CIRCUIT_OPENED_AT)
+    with _CIRCUIT_LOCK:
+        if _CIRCUIT_OPENED_AT and time.monotonic() - _CIRCUIT_OPENED_AT >= JEV_CIRCUIT_RESET_SECONDS:
+            _CIRCUIT_FAILURES = 0
+            _CIRCUIT_OPENED_AT = 0.0
+            if observability.JEV_CIRCUIT_OPEN is not None:
+                observability.JEV_CIRCUIT_OPEN.set(0)
+        return bool(_CIRCUIT_OPENED_AT)
 
 def _record_failure():
     global _CIRCUIT_FAILURES, _CIRCUIT_OPENED_AT
-    _CIRCUIT_FAILURES += 1
-    if _CIRCUIT_FAILURES >= max(1, JEV_CIRCUIT_FAILURE_THRESHOLD):
-        _CIRCUIT_OPENED_AT = time.monotonic()
-        if observability.JEV_CIRCUIT_OPEN is not None: observability.JEV_CIRCUIT_OPEN.set(1)
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILURES += 1
+        if _CIRCUIT_FAILURES >= max(1, JEV_CIRCUIT_FAILURE_THRESHOLD):
+            _CIRCUIT_OPENED_AT = time.monotonic()
+            if observability.JEV_CIRCUIT_OPEN is not None:
+                observability.JEV_CIRCUIT_OPEN.set(1)
 
-def _record_success(): reset_circuit_breaker()
-
-
-def is_available() -> bool:
-    return bool(TYPESAFE_API_KEY)
-
-
+def _record_success():
+    reset_circuit_breaker()
 def _call_systemone(state: str, questions: dict) -> dict:
     if _circuit_open():
         if observability.JEV_FAILURES is not None: observability.JEV_FAILURES.labels(reason="circuit_open").inc()
