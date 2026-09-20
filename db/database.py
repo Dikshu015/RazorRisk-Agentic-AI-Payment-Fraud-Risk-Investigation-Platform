@@ -27,8 +27,8 @@ def _translate_sql(sql: str) -> str:
     # SQLite datetime helpers -> PostgreSQL timestamp/interval expressions.
     sql = re.sub(r"datetime\(\s*'now'\s*\)", "CURRENT_TIMESTAMP", sql, flags=re.I)
     # Parameterized SQLite datetime forms become %s after placeholder translation.
-    sql = re.sub(r"datetime\(\s*%s\s*,\s*%s\s*\)", r"%s + (%s)::interval", sql, flags=re.I)
-    sql = re.sub(r"datetime\(\s*%s\s*,\s*'([^']+)'\s*\)", r"%s + INTERVAL '\1'", sql, flags=re.I)
+    sql = re.sub(r"datetime\(\s*%s\s*,\s*%s\s*\)", r"(%s)::timestamp + (%s)::interval", sql, flags=re.I)
+    sql = re.sub(r"datetime\(\s*%s\s*,\s*'([^']+)'\s*\)", r"(%s)::timestamp + INTERVAL '\1'", sql, flags=re.I)
     sql = re.sub(r"datetime\(\s*'now'\s*,\s*%s\s*\)", "CURRENT_TIMESTAMP + (%s)::interval", sql, flags=re.I)
     sql = re.sub(r"datetime\(\s*([A-Za-z_][\w.]*)\s*,\s*'([^']+)'\s*\)", r"\1 + INTERVAL '\2'", sql, flags=re.I)
     sql = re.sub(r"datetime\(\s*'now'\s*,\s*'([^']+)'\s*\)", r"CURRENT_TIMESTAMP + INTERVAL '\1'", sql, flags=re.I)
