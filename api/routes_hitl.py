@@ -77,13 +77,18 @@ def auto_resolve_review(transaction_id: str, decision_action: str, rationale: st
     review_id = row[0]
     mapped_decision = _ACTION_TO_HITL_DECISION.get(decision_action, "HOLD")
     now = datetime.datetime.now().isoformat()
-    conn.execute(
+    cursor = conn.execute(
         """UPDATE human_reviews
            SET status='RESOLVED', reviewer=?, reviewer_decision=?,
                reviewer_rationale=?, reviewed_at=?
-           WHERE review_id=?""",
+           WHERE review_id=? AND status='PENDING'""",
         (resolved_by, mapped_decision, rationale, now, review_id),
     )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        conn.close()
+        logger.info("HITL auto-resolve lost race for review=%s txn=%s; leaving human decision untouched.", review_id, transaction_id)
+        return None
     conn.execute(
         "UPDATE risk_scores SET decision=? WHERE transaction_id=?",
         (mapped_decision, transaction_id),
