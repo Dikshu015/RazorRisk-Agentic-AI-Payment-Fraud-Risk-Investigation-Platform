@@ -159,15 +159,11 @@ class TestGoldenMatrixFraud(unittest.TestCase):
         from db.database import get_raw_sqlite_connection
         conn = get_raw_sqlite_connection()
         row = conn.execute(
-            "SELECT device_id, ip_address, amount FROM transactions "
+            "SELECT device_id, ip_address, amount, timestamp FROM transactions "
             "WHERE user_id = 'USER_ATO_1' AND is_fraud_ground_truth = 1 LIMIT 1"
         ).fetchone()
         conn.close()
-        device_id, ip_address, amount = row
-        row2 = conn.execute(
-            "SELECT timestamp FROM transactions WHERE user_id = 'USER_ATO_1' AND is_fraud_ground_truth = 1 LIMIT 1"
-        ).fetchone()
-        timestamp = row2[0]
+        device_id, ip_address, amount, timestamp = row
         txn = {"user_id": "USER_ATO_1", "device_id": device_id, "ip_address": ip_address,
                "merchant_id": "MCH_SUSPICIOUS_99", "amount": amount, "timestamp": timestamp}
         r = calculate_composite_risk_score(txn)
