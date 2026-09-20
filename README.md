@@ -1427,9 +1427,9 @@ The repository contains historical validation notes from earlier development pha
 
 The merged CI workflow runs the full `pytest -q` suite on Python 3.13 before the Docker build stage.
 
-**Latest verified CI run: 97 passed, 4 failed.**
+**Latest verified CI run: 98 passed, 0 failed.**
 
-The four failures are deterministic golden-matrix risk-behavior regressions, not CI infrastructure failures:
+The initial CI failures were traced to reproducibility/test-fixture issues and are documented as Bugs #39–40:
 
 | Scenario | Observed | Test expectation |
 |---|---:|---:|
