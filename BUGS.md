@@ -11,9 +11,7 @@ it's here.
 A short summary table is kept in `README.md` under **Engineering bugs discovered and fixed**, linking here
 for full write-ups. `PROJECT_WORKFLOW.md` §4 and §4.5 now link here too instead of duplicating the text.
 
-**Current regression suite: 75 tests passed** (69 from the original suite + 6 in
-`tests/test_production_contract.py`, added during Phase 4). Verify locally with `pytest -q` or
-`python -m unittest discover`. The count moves whenever a fix adds its own coverage.
+**Current regression suite: 98 tests passed** in the latest GitHub Actions CI run on Python 3.13. The suite is run with `pytest -q`; the count moves whenever new regression coverage is added.
 
 ---
 
@@ -385,3 +383,39 @@ failure. `graph_agent.py` already treats verifier failures as non-blocking.
   release and verify timeout, malformed-JSON fallback, provider-failure fallback, and action allowlisting.
 - The `... if False else None` dead line in `ml/hyperparameter_search.py::main()` (flagged in the prior
   review) is still present — harmless, but doubles a GNN CV pass for nothing.
+
+
+---
+
+## Phase 5 — CI reproducibility and final validation (Bugs #39–40)
+
+These findings were discovered while turning the full regression suite into a blocking GitHub Actions pipeline. The CI failures were caused by reproducibility/test-fixture problems, not by weakening the fraud model's acceptance criteria.
+
+### Bug #39 — CI golden-matrix tests evaluated a freshly generated dataset with stale model artifacts
+
+The CI bootstrap generated the deterministic 12,000-transaction synthetic fixture, but the checked-in XGBoost/GNN/stacker artifacts had been produced from a different model/data snapshot. The golden matrix therefore evaluated one dataset against another model state. Four deterministic scenarios failed: USER_RING2_1, USER_ATO_1, USER_COLDSTART_FRAUD_1, and USER_FANOUT_LAUNDER.
+
+The failures initially looked like model regressions because the observed scores were below the scenario bars. Reproducing the same run exposed the actual contract problem: the test fixture was changing without retraining the scoring stack against that fixture.
+
+**Resolution:** tests/conftest.py now creates the deterministic fixture and trains the stacker against that same fixture before the suite runs. This makes the golden-matrix evaluation self-consistent and reproducible in CI instead of depending on stale checked-in artifacts.
+
+The fix deliberately did **not** lower the four scenario thresholds or delete their assertions.
+
+### Bug #40 — Account-takeover replay did not carry the historical transaction timestamp
+
+The account-takeover regression constructed a replay transaction from the seeded fraud row but omitted its original timestamp. The scoring path consequently evaluated historical state using the current wall clock, making time-window features dependent on when CI happened to execute.
+
+**Resolution:** the regression fixture now passes the seeded transaction's timestamp into the scoring call, while ml/risk_aggregator.py uses the transaction timestamp for historical feature windows. This is consistent with Bug #29's broader train/inference time-feature fix.
+
+### Final CI/CD verification
+
+After Bugs #39–40 were fixed:
+
+- **98/98 pytest tests passed**.
+- Python source compilation passed.
+- Docker image build passed.
+- CD ran only after successful CI.
+- GHCR authentication, image build, and image push all passed.
+- No fraud-matrix assertion was removed or relaxed to obtain the green build.
+
+This is the current validation state; older test counts in historical sections refer to earlier repository snapshots only.
