@@ -133,7 +133,8 @@ function loadPreset(type) {
         document.getElementById('ip_address').value = '185.220.101.44';
         document.getElementById('amount').value = '88000';
         document.getElementById('merchant_id').value = 'MCH_042';
-        document.getElementById('velocity_enabled').checked = false; updateVelocitySourceUI();
+        document.getElementById('velocity_enabled').checked = true; updateVelocitySourceUI();
+        document.getElementById('velocity_1h').value = '25';
         document.getElementById('is_vpn_proxy').checked = true;
         document.getElementById('is_suspicious_proxy').checked = true;
     } else if (type === 'ring2') {
@@ -142,7 +143,8 @@ function loadPreset(type) {
         document.getElementById('ip_address').value = '198.51.100.99';
         document.getElementById('amount').value = '95000';
         document.getElementById('merchant_id').value = 'MCH_042';
-        document.getElementById('velocity_enabled').checked = false; updateVelocitySourceUI();
+        document.getElementById('velocity_enabled').checked = true; updateVelocitySourceUI();
+        document.getElementById('velocity_1h').value = '30';
         document.getElementById('is_vpn_proxy').checked = true;
         document.getElementById('is_suspicious_proxy').checked = true;
     } else if (type === 'carding') {
@@ -150,10 +152,11 @@ function loadPreset(type) {
         document.getElementById('device_id').value = 'DEV_CARDER_X';
         document.getElementById('ip_address').value = '203.0.113.50';
         document.getElementById('amount').value = '49';
-        document.getElementById('merchant_id').value = 'MCH_012';
-        document.getElementById('velocity_enabled').checked = false; updateVelocitySourceUI();
+        document.getElementById('merchant_id').value = 'MCH_042';
+        document.getElementById('velocity_enabled').checked = true; updateVelocitySourceUI();
+        document.getElementById('velocity_1h').value = '15';
         document.getElementById('is_vpn_proxy').checked = true;
-        document.getElementById('is_suspicious_proxy').checked = false;
+        document.getElementById('is_suspicious_proxy').checked = true;
     }
 }
 
