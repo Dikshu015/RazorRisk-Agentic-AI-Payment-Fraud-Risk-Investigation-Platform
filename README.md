@@ -1449,3 +1449,38 @@ scoring plus deterministic investigation/HITL paths were exercised.
   scenarios rather than only `USER_RING2_1` as in the original Bug #29 write-up — see
   [Stacker effect](#stacker-effect) above for the current numbers and [Bug #29 in BUGS.md](BUGS.md) for
   why this wasn't papered over with a lucky threshold or a cherry-picked retrain.
+
+
+## Jev Verification Layer
+
+RazorRisk includes an optional independent **Jev (TypeSafe System One)** verification pass after an investigation has been generated. Jev is deliberately outside the fraud-scoring hot path: it does not change XGBoost/GNN/stacker scoring and cannot block the underlying investigation from completing.
+
+The verifier independently checks two things:
+
+- **Action agreement** — whether Jev's structured action agrees with the investigator's action vocabulary.
+- **Hypothesis grounding** — whether the investigator's concrete claims are supported by the deterministic evidence supplied to Jev.
+
+A disagreement or weak grounding result becomes `REVIEW_RECOMMENDED`. Only a `CONSISTENT` result above `JEV_AUTO_RESOLVE_MIN_CONFIDENCE` can qualify an eligible pending HITL review for automatic resolution; mandatory-human reasons remain non-bypassable.
+
+### Jev resilience
+
+The external Jev call is treated as an optional dependency. The integration supports bounded retries for timeouts, connection failures, HTTP 429, and HTTP 5xx responses, exponential backoff, and a process-local circuit breaker. Non-transient HTTP 4xx responses are not retried. If Jev is unavailable, malformed, unconfigured, or exhausted, RazorRisk fails open and continues the investigation without Jev.
+
+Configuration:
+
+    JEV_MAX_RETRIES=2
+    JEV_RETRY_BACKOFF_SECONDS=0.25
+    JEV_CIRCUIT_FAILURE_THRESHOLD=3
+    JEV_CIRCUIT_RESET_SECONDS=30
+
+Each successful Jev verification carries a `jev_request_id` so provider activity can be correlated with application logs.
+
+### Jev observability
+
+Prometheus exposes Jev-specific signals for request outcomes, failures, latency, retries, action disagreement, grounding failures, unavailable calls, auto-resolutions, and circuit-breaker state. These are operational signals only; they do not alter fraud thresholds or payment decisions.
+
+### Jev testing and effectiveness evaluation
+
+The Jev regression suite covers availability, agreement/disagreement, grounding failures, confidence floors, unsupported actions, malformed probabilities, transient retry recovery, circuit-breaker behavior, non-transient 4xx handling, and invalid numeric confidence values.
+
+When a real TypeSafe API key is available, the next evaluation step is to compare Jev-enabled and Jev-disabled investigations using human-reviewed cases as the reference: agreement rate, review recommendation rate, grounding failures, false auto-resolutions, provider failure rate, and added latency. Without the external API key, the repository can still validate the integration contract and failure handling, but cannot make a substantive claim about Jev's real-world verification effectiveness.
