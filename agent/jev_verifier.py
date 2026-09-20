@@ -172,11 +172,7 @@ def verify_investigation(txn_payload: dict, risk_summary: dict, evidence: dict,
         raise RuntimeError(f"Malformed Jev action response: {exc}") from exc
 
     grounding_resp = _call_systemone(
-        state=f"Evidence:
-{evidence_state}
-
-Investigator's fraud hypothesis:
-{fraud_hypothesis}",
+        state=f"Evidence:\n{evidence_state}\n\nInvestigator's fraud hypothesis:\n{fraud_hypothesis}",
         questions={
             "hypothesis_grounded": {
                 "type": "noul",
