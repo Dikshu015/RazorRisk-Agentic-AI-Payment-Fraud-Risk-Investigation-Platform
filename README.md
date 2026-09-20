@@ -67,7 +67,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - **Evidence-grounded investigation** — four deterministic tools (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`) compute the underlying evidence; an LLM, when available, interprets it rather than inventing it.
 - **One coherent synthetic evaluation domain** — both XGBoost and GraphSAGE are trained and evaluated from the same RazorRisk synthetic transaction population, using complementary transaction-level and relational feature sets; the learned stacker is trained on paired predictions from those same transactions.
 - **A golden adversarial test matrix** — `tests/GOLDEN_TEST_MATRIX.md` checks the trained model against dozens of named fraud-ring and benign-look-alike scenarios (hostel Wi-Fi, carrier-NAT, festival sales, family devices) and discloses, by name, the cases that are still gaps rather than claiming full coverage.
-- **A published bug history, not just a feature list** — 36 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
+- **A published bug history, not just a feature list** — 38 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
 - **One shared production data layer** — PostgreSQL/Supabase is the production source of truth for transactions, risk scores, HITL state, and investigations; SQLite is retained only as an explicit test/local fallback.
 
 ---
@@ -671,7 +671,7 @@ Those distinctions are intentional.
 
 ## Engineering bugs discovered and fixed
 
-The project was developed through repeated end-to-end testing rather than only happy-path demos. 36
+The project was developed through repeated end-to-end testing rather than only happy-path demos. 38
 numbered bugs materially changed the architecture, across four phases: foundational design (graph
 explosion, hand-picked fusion weights, train/test leakage), multi-platform deployment (Render/Vercel/Cloud
 Run filesystem and routing issues), testing/regression validation (client-trusted velocity in three places,
@@ -1422,8 +1422,7 @@ scoring plus deterministic investigation/HITL paths were exercised.
   consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
   `tests/test_evaluation_contract.py` are built from) and `ml/models/hyperparameters.json` (the CV search
   output actually consumed by all three training functions, per Bug #28) match what's documented above.
-- 75 automated tests across `tests/*.py`, covering scoring, policy, HITL, graph freshness, rate limiting,
-  and every numbered regression in [BUGS.md](BUGS.md).
+- Current full-suite validation: **95 passed, 2 failed**; the two failures are the disclosed golden-matrix account-takeover and fan-out-launder cases, while the Jev-specific suite has **17 passed**.
 - The PostgreSQL migration is real and complete across every consumer: `db/database.py`'s connection
   helper dispatches to a genuine PostgreSQL connection (via a dialect-translating wrapper) whenever
   `DATABASE_URL` is a PostgreSQL URL, and all 13 application/ML modules that touch the database go through
