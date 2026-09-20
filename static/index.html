@@ -11,6 +11,7 @@
     <!-- Vis.js for Graph Visualization -->
     <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
     <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="app-container">
@@ -233,9 +234,15 @@
             <!-- Tab 2: Graph Network Explorer -->
             <section id="tab-graph" class="tab-content">
                 <div class="card">
-                    <div class="card-header">
-                        <h3>Interactive transaction network topology</h3>
-                        <p>User ↔ device ↔ IP ↔ merchant connections, 2-hop neighborhood</p>
+                    <div class="card-header graph-header">
+                        <div>
+                            <h3>Interactive transaction network topology</h3>
+                            <p>User ↔ device ↔ IP ↔ merchant connections, bounded 2-hop neighborhood</p>
+                        </div>
+                        <div class="graph-actions">
+                            <button class="btn-preset" onclick="rebuildGraph()">Rebuild graph</button>
+                            <button class="btn-preset" onclick="loadGraphCommunities()">Refresh communities</button>
+                        </div>
                     </div>
                     <div class="graph-legend">
                         <span class="legend-item"><i class="legend-dot legend-user"></i>User</span>
@@ -246,6 +253,17 @@
                     </div>
                     <div id="graph-truncated-note" class="graph-note" style="display:none;">Showing the most connected subset — this entity has more connections than fit legibly on one view.</div>
                     <div id="vis-network-container" class="graph-canvas"></div>
+                    <div class="graph-intel-grid">
+                        <div class="mini-panel">
+                            <div class="mini-panel-title">Community intelligence</div>
+                            <div id="community-summary" class="community-summary">Loading detected communities…</div>
+                            <div id="community-list" class="community-list"></div>
+                        </div>
+                        <div class="mini-panel">
+                            <div class="mini-panel-title">Risk distribution · recent feed</div>
+                            <div class="chart-wrap"><canvas id="risk-distribution-chart"></canvas></div>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -265,6 +283,15 @@
                             <input type="checkbox" id="jev-toggle" onchange="setJevMode(this.checked)" disabled>
                             <span id="jev-status-badge" class="agent-status-badge">Checking…</span>
                         </div>
+                    </div>
+                    <div class="investigation-history">
+                        <div class="history-title">Existing investigation</div>
+                        <div class="history-controls">
+                            <input type="text" id="investigation-transaction-id" placeholder="Enter transaction ID">
+                            <button class="btn-preset" onclick="loadInvestigationReport()">Load report</button>
+                            <button class="btn-preset" onclick="runSynchronousInvestigation()">Run direct investigation</button>
+                        </div>
+                        <div id="investigation-history-status" class="history-status"></div>
                     </div>
                     <div id="agent-report-container" class="markdown-report-box">
                         <div class="placeholder-msg">Submit a high-risk transaction (risk score ≥ 70) to see the agent's investigation report here.</div>
@@ -321,7 +348,10 @@
             <section id="tab-logs" class="tab-content">
                 <div class="card">
                     <div class="card-header">
-                        <h3>System audit logs console</h3>
+                        <div>
+                            <h3>System audit logs console</h3>
+                            <p>Application, risk, agent, ML, graph, database and pipeline channels</p>
+                        </div>
                         <button class="btn-preset" onclick="refreshLogStream()">Refresh logs</button>
                     </div>
                     <div class="log-grid">
@@ -329,9 +359,19 @@
                             <h4>Risk engine log — logs/risk_engine.log</h4>
                             <pre id="log-risk-engine">Loading logs…</pre>
                         </div>
+                        <div class="log-box"><h4>Application</h4><pre id="log-app">Loading logs…</pre>
+                        </div>
                         <div class="log-box">
                             <h4>Agent investigation log — logs/agent_investigations.log</h4>
                             <pre id="log-agent">Loading logs…</pre>
+                        </div>
+                        <div class="log-box"><h4>ML training</h4><pre id="log-ml">Loading logs…</pre>
+                        </div>
+                        <div class="log-box"><h4>Graph</h4><pre id="log-graph">Loading logs…</pre>
+                        </div>
+                        <div class="log-box"><h4>Database</h4><pre id="log-db">Loading logs…</pre>
+                        </div>
+                        <div class="log-box"><h4>Pipeline</h4><pre id="log-pipeline">Loading logs…</pre>
                         </div>
                     </div>
                 </div>
