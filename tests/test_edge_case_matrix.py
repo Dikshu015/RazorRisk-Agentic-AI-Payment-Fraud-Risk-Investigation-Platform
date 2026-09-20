@@ -164,8 +164,12 @@ class TestGoldenMatrixFraud(unittest.TestCase):
         ).fetchone()
         conn.close()
         device_id, ip_address, amount = row
+        row2 = conn.execute(
+            "SELECT timestamp FROM transactions WHERE user_id = 'USER_ATO_1' AND is_fraud_ground_truth = 1 LIMIT 1"
+        ).fetchone()
+        timestamp = row2[0]
         txn = {"user_id": "USER_ATO_1", "device_id": device_id, "ip_address": ip_address,
-               "merchant_id": "MCH_SUSPICIOUS_99", "amount": amount}
+               "merchant_id": "MCH_SUSPICIOUS_99", "amount": amount, "timestamp": timestamp}
         r = calculate_composite_risk_score(txn)
         self.assertGreaterEqual(r["risk_score"], MEDIUM_THRESHOLD,
                                  f"expected at least MEDIUM (spec says MEDIUM-HIGH), got {r['risk_score']} ({r['risk_tier']})")
