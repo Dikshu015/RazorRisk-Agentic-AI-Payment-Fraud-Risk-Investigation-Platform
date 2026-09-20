@@ -20,12 +20,14 @@ actually did.
 """
 import uuid
 import datetime
+import time
 
 from agent.tools import GraphTool, TransactionHistoryTool, DeviceRiskTool, FraudModelTool
 from agent.deterministic_agent import determine_fraud_hypothesis
 from agent import llm_investigator, jev_verifier, mode_state
 from agent.prompts import REPORT_TEMPLATE
 from utils.logger import get_logger
+from infra import observability
 
 logger = get_logger("graph_agent")
 
@@ -98,10 +100,17 @@ class RiskInvestigationAgent:
         if mode_state.get_jev_verification_enabled():
             if jev_verifier.is_available():
                 try:
+                    jev_started = time.perf_counter()
                     jev_verification = jev_verifier.verify_investigation(
                         txn_payload, risk_summary, evidence, hypothesis, rec_action
                     )
+                    if observability.JEV_LATENCY is not None:
+                        observability.JEV_LATENCY.observe(time.perf_counter() - jev_started)
                 except Exception as e:
+                    if observability.JEV_REQUESTS is not None:
+                        observability.JEV_REQUESTS.labels(outcome="failure").inc()
+                    if observability.JEV_LATENCY is not None:
+                        observability.JEV_LATENCY.observe(time.perf_counter() - jev_started)
                     logger.warning(f"Jev verification failed ({e}) — continuing without it.")
             else:
                 logger.info("Jev verification requested but TYPESAFE_API_KEY not configured — skipping.")
