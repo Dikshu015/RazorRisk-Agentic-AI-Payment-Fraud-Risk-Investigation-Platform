@@ -7,7 +7,10 @@ flowchart TB
     PWN --> PM
     API --> OT[OpenTelemetry SDK]
     W1 --> OTW[OpenTelemetry SDK]
+    API --> JL[Jev verification logs<br/>existing investigation channel]
+    W1 --> JL
     OT --> COL[OTLP Collector / APM]
     OTW --> COL
     PM --> G[Grafana]
+    JL --> AUD[Audit / investigation logs]
     
