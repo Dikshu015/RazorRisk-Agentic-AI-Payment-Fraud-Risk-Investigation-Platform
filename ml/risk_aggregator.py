@@ -434,13 +434,13 @@ def live_tabular_score(txn_payload: dict, velocity_1h: int) -> tuple[float, dict
         # behavior should matter more than all-time history) kept in sync
         # via the shared PRIOR_AMOUNT_WINDOW_DAYS constant in config.py.
         cur.execute(
-            "SELECT AVG(amount), COUNT(amount) FROM transactions WHERE user_id = ? AND timestamp > datetime('now', ?)",
-            (user_id, f"-{PRIOR_AMOUNT_WINDOW_DAYS} days")
+            "SELECT AVG(amount), COUNT(amount) FROM transactions WHERE user_id = ? AND timestamp > datetime(?, ?)",
+            (user_id, ref_time.isoformat(sep=" "), f"-{PRIOR_AMOUNT_WINDOW_DAYS} days")
         )
         prior_avg, prior_count = cur.fetchone()
         cur.execute(
-            "SELECT amount FROM transactions WHERE user_id = ? AND timestamp > datetime('now', ?)",
-            (user_id, f"-{PRIOR_AMOUNT_WINDOW_DAYS} days")
+            "SELECT amount FROM transactions WHERE user_id = ? AND timestamp > datetime(?, ?)",
+            (user_id, ref_time.isoformat(sep=" "), f"-{PRIOR_AMOUNT_WINDOW_DAYS} days")
         )
         prior_amounts = [r[0] for r in cur.fetchall()]
         prior_std = float(np.std(prior_amounts, ddof=1)) if prior_count and prior_count > 1 else 0.0
@@ -453,8 +453,8 @@ def live_tabular_score(txn_payload: dict, velocity_1h: int) -> tuple[float, dict
         # much longer 7-day trailing window survives that pacing evasion.
         cur.execute("""
             SELECT COUNT(DISTINCT device_id) FROM transactions
-            WHERE user_id = ? AND timestamp > datetime('now', '-7 days')
-        """, (user_id,))
+            WHERE user_id = ? AND timestamp > datetime(?, '-7 days')
+        """, (user_id, ref_time.isoformat(sep=" ")))
         prior_distinct_devices = cur.fetchone()[0] or 0
         incoming_device = txn_payload.get("device_id")
         cur.execute("SELECT 1 FROM transactions WHERE user_id = ? AND device_id = ? LIMIT 1", (user_id, incoming_device))
@@ -468,12 +468,12 @@ def live_tabular_score(txn_payload: dict, velocity_1h: int) -> tuple[float, dict
         incoming_merchant = txn_payload.get("merchant_id", "")
         cur.execute("""
             SELECT COUNT(DISTINCT merchant_id) FROM transactions
-            WHERE user_id = ? AND timestamp > datetime('now', '-1 hours')
-        """, (user_id,))
+            WHERE user_id = ? AND timestamp > datetime(?, '-1 hours')
+        """, (user_id, ref_time.isoformat(sep=" ")))
         prior_distinct_merchants = cur.fetchone()[0] or 0
         cur.execute(
-            "SELECT 1 FROM transactions WHERE user_id = ? AND merchant_id = ? AND timestamp > datetime('now', '-1 hours') LIMIT 1",
-            (user_id, incoming_merchant)
+            "SELECT 1 FROM transactions WHERE user_id = ? AND merchant_id = ? AND timestamp > datetime(?, '-1 hours') LIMIT 1",
+            (user_id, incoming_merchant, ref_time.isoformat(sep=" "))
         )
         merchant_seen = bool(cur.fetchone())
         distinct_merchants_1h = prior_distinct_merchants + (0 if merchant_seen else 1)
@@ -485,8 +485,8 @@ def live_tabular_score(txn_payload: dict, velocity_1h: int) -> tuple[float, dict
         cur.execute("""
             SELECT COUNT(*) FROM transactions
             WHERE user_id = ? AND merchant_id = ?
-              AND timestamp > datetime('now', '-1 hours')
-        """, (user_id, incoming_merchant))
+              AND timestamp > datetime(?, '-1 hours')
+        """, (user_id, incoming_merchant, ref_time.isoformat(sep=" ")))
         same_merchant_1h = int(cur.fetchone()[0] or 0) + 1
 
         feature_row = {
@@ -533,9 +533,17 @@ def calculate_composite_risk_score(txn_payload: dict) -> dict:
         velocity_source = "CLIENT"
     else:
         conn = get_raw_sqlite_connection()
+        # Use the transaction timestamp when replaying/scoring historical
+        # transactions; live API calls without a timestamp naturally fall
+        # back to the current wall clock inside live_tabular_score().
+        ref_time = txn_payload.get("timestamp")
+        if isinstance(ref_time, str):
+            ref_time = _dt.datetime.fromisoformat(ref_time)
+        elif not isinstance(ref_time, _dt.datetime):
+            ref_time = _dt.datetime.now()
         velocity_1h = conn.execute(
-            "SELECT COUNT(*) FROM transactions WHERE user_id = ? AND timestamp > datetime('now', '-1 hours')",
-            (user_id,)
+            "SELECT COUNT(*) FROM transactions WHERE user_id = ? AND timestamp > datetime(?, '-1 hours')",
+            (user_id, ref_time.isoformat(sep=" "))
         ).fetchone()[0] + 1
         conn.close()
         velocity_source = "BACKEND"
