@@ -490,7 +490,8 @@ function runDataPipeline(mode) {
         })
         .finally(() => {
             synthBtn.disabled = false;
-            realBtn.disabled = false;
+            const realBtn = document.getElementById('btn-seed-real');
+            if (realBtn) realBtn.disabled = false;
             // Clear a settled status message after a while so it doesn't sit
             // in the header permanently — but leave errors up longer, since
             // those need to actually be read and acted on.
@@ -560,6 +561,11 @@ function refreshLogStream() {
         .then(data => {
             document.getElementById('log-risk-engine').innerText = data.risk_engine_logs.join('\n');
             document.getElementById('log-agent').innerText = data.agent_logs.join('\n');
+            document.getElementById('log-app').innerText = data.app_logs.join('\n');
+            document.getElementById('log-ml').innerText = data.ml_training_logs.join('\n');
+            document.getElementById('log-graph').innerText = data.graph_logs.join('\n');
+            document.getElementById('log-db').innerText = data.database_logs.join('\n');
+            document.getElementById('log-pipeline').innerText = data.pipeline_logs.join('\n');
         })
         .catch(err => console.error("Error streaming logs:", err));
 }
@@ -689,8 +695,7 @@ async function loadInvestigationReport() {
 }
 
 async function runSynchronousInvestigation() {
-    const txId = document.getElementById('investigation-transaction-id')?.value.trim() ||
-        document.getElementById('user_id')?.value.trim();
+    const txId = document.getElementById('investigation-transaction-id')?.value.trim();
     const status = document.getElementById('investigation-history-status');
     if (!txId) { if (status) status.textContent = 'Enter a transaction ID first.'; return; }
     if (status) status.textContent = 'Running direct investigation…';
