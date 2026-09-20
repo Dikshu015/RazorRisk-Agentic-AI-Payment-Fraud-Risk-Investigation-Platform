@@ -1451,6 +1451,12 @@ scoring plus deterministic investigation/HITL paths were exercised.
   why this wasn't papered over with a lucky threshold or a cherry-picked retrain.
 
 
+## Jev Verification Layer — Integrated
+
+> **Jev is fully integrated into RazorRisk as an independent post-investigation verification layer.** It is not a planned/future feature. The production code path, API integration, resilience controls, HITL automation, observability, tests, and architecture diagrams are all included in this repository.
+
+**Flow:** Fraud scoring → Agentic investigation → **Jev independent verification** → controlled HITL auto-resolution / human review.
+
 ## Jev Verification Layer
 
 RazorRisk includes an optional independent **Jev (TypeSafe System One)** verification pass after an investigation has been generated. Jev is deliberately outside the fraud-scoring hot path: it does not change XGBoost/GNN/stacker scoring and cannot block the underlying investigation from completing.
