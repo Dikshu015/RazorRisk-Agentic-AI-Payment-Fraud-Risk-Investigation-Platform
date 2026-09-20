@@ -14,4 +14,9 @@ def pytest_sessionstart(session):
     # Seed the deterministic golden fixture once so tests that inspect the
     # synthetic communities directly do not depend on the shipped SQLite DB.
     from data.generate_synthetic_data import generate_dataset
+    # Train the checked-in scoring pipeline against the same deterministic
+    # fixture used by the golden matrix. This prevents the tests from
+    # evaluating a model artifact trained on a different dataset snapshot.
     generate_dataset(num_users=1500, num_transactions=12000, seed=42)
+    from ml.risk_aggregator import train_stacker
+    train_stacker()
