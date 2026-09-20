@@ -1,6 +1,7 @@
 """Tests for agent/jev_verifier.py and the HITL auto-resolution it feeds."""
 import unittest
 from unittest.mock import patch, MagicMock
+import requests
 from agent import jev_verifier
 from api.routes_hitl import auto_resolve_review, jev_auto_resolve_eligible, _ACTION_TO_HITL_DECISION
 from db.database import get_raw_sqlite_connection
@@ -124,6 +125,42 @@ class TestAutoResolveReviewAgainstRealDb(unittest.TestCase):
         self.assertEqual(first,review_id); self.assertIsNone(second)
     def test_auto_resolve_returns_none_when_no_review_was_ever_queued(self):
         self.assertIsNone(auto_resolve_review("TXN_NEVER_QUEUED","HOLD_FOR_MANUAL_REVIEW","n/a"))
+
+
+    @patch.object(jev_verifier, "TYPESAFE_API_KEY", "sk_test_123")
+    @patch.object(jev_verifier, "JEV_MAX_RETRIES", 2)
+    @patch("agent.jev_verifier.requests.post")
+    def test_transient_failure_retries_then_succeeds(self, mock_post):
+        mock_post.side_effect = [requests.Timeout(), _mock_response({"answers": {"recommended_action": {"choice": "HOLD_FOR_MANUAL_REVIEW", "confidence": 0.9}}}), _mock_response({"answers": {"hypothesis_grounded": {"noul": 0.9}}})]
+        result = jev_verifier.verify_investigation({}, {"risk_score": 80}, _evidence(), "Evidence-backed.", "HOLD_FOR_MANUAL_REVIEW")
+        self.assertEqual(result["verification_flag"], "CONSISTENT"); self.assertEqual(mock_post.call_count, 3)
+
+    @patch.object(jev_verifier, "TYPESAFE_API_KEY", "sk_test_123")
+    @patch.object(jev_verifier, "JEV_MAX_RETRIES", 1)
+    @patch.object(jev_verifier, "JEV_CIRCUIT_FAILURE_THRESHOLD", 1)
+    @patch("agent.jev_verifier.requests.post")
+    def test_circuit_breaker_opens_after_transient_exhaustion(self, mock_post):
+        mock_post.side_effect = requests.Timeout()
+        jev_verifier.reset_circuit_breaker()
+        with self.assertRaises(RuntimeError): jev_verifier.verify_investigation({}, {}, _evidence(), "x", "HOLD_FOR_MANUAL_REVIEW")
+        with self.assertRaisesRegex(RuntimeError, "circuit breaker"): jev_verifier.verify_investigation({}, {}, _evidence(), "x", "HOLD_FOR_MANUAL_REVIEW")
+        self.assertEqual(mock_post.call_count, 2)
+        jev_verifier.reset_circuit_breaker()
+
+    @patch.object(jev_verifier, "TYPESAFE_API_KEY", "sk_test_123")
+    @patch("agent.jev_verifier.requests.post")
+    def test_non_transient_4xx_is_not_retried(self, mock_post):
+        resp=_mock_response({}); resp.status_code=400
+        mock_post.return_value=resp
+        with self.assertRaisesRegex(RuntimeError, "HTTP request failed"): jev_verifier.verify_investigation({}, {}, _evidence(), "x", "HOLD_FOR_MANUAL_REVIEW")
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch.object(jev_verifier, "TYPESAFE_API_KEY", "sk_test_123")
+    @patch("agent.jev_verifier.requests.post")
+    def test_nan_action_confidence_is_rejected(self, mock_post):
+        import math
+        mock_post.return_value=_mock_response({"answers": {"recommended_action": {"choice": "HOLD_FOR_MANUAL_REVIEW", "confidence": math.nan}}})
+        with self.assertRaisesRegex(RuntimeError, "invalid action confidence"): jev_verifier.verify_investigation({}, {}, _evidence(), "x", "HOLD_FOR_MANUAL_REVIEW")
 
 if __name__=="__main__":
     unittest.main()
