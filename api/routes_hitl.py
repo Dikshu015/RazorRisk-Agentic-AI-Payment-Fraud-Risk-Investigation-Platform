@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger
+from infra import observability
 
 router = APIRouter(prefix="/api/v1/hitl", tags=["Human-in-the-Loop"])
 logger = get_logger("hitl")
@@ -89,6 +90,8 @@ def auto_resolve_review(transaction_id: str, decision_action: str, rationale: st
     )
     conn.commit()
     conn.close()
+    if observability.JEV_AUTO_RESOLVED is not None:
+        observability.JEV_AUTO_RESOLVED.inc()
     logger.info(
         "HITL auto-resolved by %s: review=%s txn=%s decision=%s (source action=%s)",
         resolved_by, review_id, transaction_id, mapped_decision, decision_action,
