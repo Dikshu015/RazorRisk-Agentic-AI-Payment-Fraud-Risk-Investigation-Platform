@@ -505,6 +505,13 @@ function loadStats() {
             document.getElementById('stat-total-txns').innerText = data.total_transactions;
             document.getElementById('stat-high-risk').innerText = data.high_risk_transactions;
             document.getElementById('stat-investigations').innerText = data.investigations_conducted;
+            const total = Number(data.total_transactions || 0);
+            const high = Number(data.high_risk_transactions || 0);
+            const coverage = total > 0 ? Math.min(100, (high / total) * 100) : 0;
+            const coverageEl = document.getElementById('stat-risk-coverage');
+            const ringEl = document.getElementById('risk-coverage-ring');
+            if (coverageEl) coverageEl.innerText = coverage.toFixed(1) + '%';
+            if (ringEl) ringEl.style.background = `conic-gradient(var(--signal) ${coverage}%, #1A2636 0)`;
         })
         .catch(err => console.error("Stats fetch error:", err));
 }
