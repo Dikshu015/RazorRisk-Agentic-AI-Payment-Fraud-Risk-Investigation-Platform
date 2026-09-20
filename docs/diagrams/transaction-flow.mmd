@@ -25,7 +25,7 @@ flowchart TB
     R --> Q[HITL queue]
     Q --> HR[Human reviewer]
     Q --> I[Investigation agent]
-    I --> J[Jev verification<br/>optional]
+    I --> J[Jev verification<br/>optional; resilient external call]
     J --> JV{Consistent + grounded<br/>+ confidence floor?}
     JV -->|No| HR
     JV -->|Yes| MH{Mandatory-human reason?}
