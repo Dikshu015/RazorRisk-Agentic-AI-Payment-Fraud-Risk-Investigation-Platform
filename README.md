@@ -952,6 +952,7 @@ flowchart TB
     PWN --> PM
     API --> OT[OpenTelemetry SDK]
     W1 --> OTW[OpenTelemetry SDK]
+    API --> JV[Jev Prometheus metrics<br/>latency / retries / failures / disagreement]
     OT --> COL[OTLP Collector / APM]
     OTW --> COL
     PM --> G[Grafana]
@@ -1041,7 +1042,7 @@ API replicas can be scaled independently from investigation workers. Prometheus 
 
 ### Diagram source
 
-The production observability Mermaid source is maintained at [`docs/diagrams/observability.mmd`](docs/diagrams/observability.mmd) alongside the existing diagram sources.
+The production observability Mermaid source is maintained at [`docs/diagrams/observability.mmd`](docs/diagrams/observability.mmd). The source includes the Jev Prometheus metrics path; the README diagram mirrors that current source. Diagram files are retained as source artifacts rather than replaced by screenshots.
 
 ---
 
@@ -1165,7 +1166,7 @@ For a short technical demo:
 - `tests/` — unit, integration, regression, contract, and evaluation tests, plus the golden fraud-scenario matrix
 - `logs/` — runtime audit/system logs (one file per subsystem, correlation-ID-traceable)
 - `README.md` — this file
-- `BUGS.md` — the full 38-bug engineering history referenced throughout this README
+- `BUGS.md` — the full 40-bug engineering history referenced throughout this README
 - `PROJECT_WORKFLOW.md` — the development process behind that history
 - `config.py`, `run.py` — configuration and local entrypoint
 - `requirements.txt`, `pyproject.toml`, `uv.lock` — Python dependencies
@@ -1248,7 +1249,7 @@ Then, after configuring `TYPESAFE_API_KEY`, rerun the same command. The script w
 | Configuration | Median latency | P95 latency | Runs | Status |
 |---|---:|---:|---:|---|
 | Without Jev | **38.60 ms** | **136.85 ms** | 3 | Baseline measured locally on 2026-09-20 |
-| With Jev | **[TO FILL AFTER API KEY]** | **[TO FILL AFTER API KEY]** | 3 | Requires `TYPESAFE_API_KEY` |
+| With Jev | **Not measured** | **Not measured** | — | Requires `TYPESAFE_API_KEY`; no provider-backed run has been claimed yet |
 
 These are **latency/operational benchmarks**, not fraud-detection accuracy claims. Accuracy or review-quality claims require an independently labeled evaluation set and should be reported separately.
  Every investigation report records the mode that *actually ran* — including `deterministic_fallback` when a configured provider was attempted but failed — so the report never implies an LLM call happened when it didn't.
@@ -1436,24 +1437,24 @@ The repository contains historical validation notes from earlier development pha
 
 ### Current GitHub Actions verification
 
-The merged CI workflow runs the full `pytest -q` suite on Python 3.13 before the Docker build stage.
+The merged CI workflow runs the full `pytest -q` suite on Python 3.13 before the Docker build stage. On trusted pushes to `main`, it also executes a live Supabase PostgreSQL smoke test using the repository secret `SUPABASE_DATABASE_URL`.
 
-**Latest verified CI run: 98 passed, 0 failed.**
+**Latest verified regression result: 98 passed, 0 failed.** The four scenarios that initially failed during CI rollout were fixed as Bugs #39–40 without deleting or weakening their assertions.
 
-The initial CI failures were traced to reproducibility/test-fixture issues and are documented as Bugs #39–40:
+### Historical initial CI failures — retained for traceability
 
-| Scenario | Observed | Test expectation |
+The first CI rollout exposed four deterministic golden-matrix failures. They are retained here because they explain Bugs #39–40 and the reason the test bootstrap was changed:
+
+| Scenario | Initial observed result | Original test expectation |
 |---|---:|---:|
 | Ring2 / IP proxy (`USER_RING2_1`) | 27.7 LOW | >= 40 MEDIUM |
 | Account takeover (`USER_ATO_1`) | 6.2 LOW | >= 40 MEDIUM |
 | Cold-start fraud (`USER_COLDSTART_FRAUD_1`) | 67.2 MEDIUM | >= 70 HIGH |
 | Fan-out laundering (`USER_FANOUT_LAUNDER`) | 26.3 LOW | >= 70 HIGH |
 
-These remain **known model-behavior gaps**. They have not been hidden by weakening the CI workflow, and no threshold or test assertion was changed merely to make CI green.
+Those observations describe the **pre-fix CI state**, not the current result. No fraud-matrix assertion was removed or relaxed to obtain the current green regression suite.
 
-The Jev-specific regressions exercised by the CI suite are passing; the remaining four failures are in the broader golden fraud-scenario matrix.
-
-Because the CI job failed, the Docker-build stage was correctly skipped. The CD workflow is therefore present and merged, but a passing CI run is still required before the normal container-build path is considered release-verified.
+The current workflow therefore reaches the Docker build after the test job succeeds, and CD is gated on successful CI. The remaining release-verification item is the first live Supabase job after the repository secret was configured.
 
 ### Historical validation snapshot
 
@@ -1481,10 +1482,8 @@ The CI rollout subsequently exposed reproducibility issues in the golden-matrix 
   `docker-compose.yml`'s dedicated `investigation-worker` service. Both now degrade gracefully instead of
   hard-failing when Redis is unavailable and `REDIS_REQUIRED=false` (the default) — see Bug #34.
 
-**Known follow-ups (not blocking CI):**
-- The PostgreSQL path has been verified by static code tracing but not yet execution-verified against a
-  live PostgreSQL/Supabase instance — run the test suite and demo script once against a real instance
-  before calling the migration release-verified.
+**Known follow-ups (not blocking the local/regression suite):**
+- The repository now has a live Supabase PostgreSQL smoke-test job on trusted `main` pushes. The first run after configuring `SUPABASE_DATABASE_URL` is the execution verification for the PostgreSQL data plane; until that run passes, the repository should not claim the Supabase connection has been CI-verified.
 - `ml/models/gnn_eval.json` (written by running `ml/train_gnn.py` standalone) and the `gnn_only` block in
   `ml/models/aggregator_eval.json` currently report different totals (1,035 rows vs 9,218 rows) because
   they come from different evaluation entry points — not because either file is stale or wrong. Worth a
