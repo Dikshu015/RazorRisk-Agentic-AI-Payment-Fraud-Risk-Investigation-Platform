@@ -31,7 +31,7 @@ DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "10"))
 # libpq's own connect_timeout has no default, so an unreachable/firewalled
 # Postgres host (wrong DATABASE_URL, DB paused, etc.) hangs psycopg.connect()
 # on the TCP handshake indefinitely instead of raising. Since init_db() runs
-# inside the FastAPI lifespan startup — before the port is ever bound — that
+# inside the FastAPI lifespan — before the port is ever bound — that
 # hang is what stalls the whole boot on PaaS platforms. 5s is generous for
 # any real network path; a bad host now fails loudly in seconds instead of
 # silently for minutes.
@@ -86,6 +86,13 @@ TYPESAFE_TIMEOUT_SECONDS = float(os.getenv("TYPESAFE_TIMEOUT_SECONDS", "5"))
 # (api/routes_agent.py). Kept high on purpose — this only ever *removes*
 # a human from a queue, so it should fire on genuinely unambiguous cases.
 JEV_AUTO_RESOLVE_MIN_CONFIDENCE = float(os.getenv("JEV_AUTO_RESOLVE_MIN_CONFIDENCE", "0.85"))
+# Resilience controls for the external Jev verification dependency. These are
+# deliberately conservative: retry only transient provider failures, then
+# fail open so Jev can never block the underlying investigation.
+JEV_MAX_RETRIES = int(os.getenv("JEV_MAX_RETRIES", "2"))
+JEV_RETRY_BACKOFF_SECONDS = float(os.getenv("JEV_RETRY_BACKOFF_SECONDS", "0.25"))
+JEV_CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("JEV_CIRCUIT_FAILURE_THRESHOLD", "3"))
+JEV_CIRCUIT_RESET_SECONDS = float(os.getenv("JEV_CIRCUIT_RESET_SECONDS", "30"))
 
 # CORS: defaults to "*" so the dashboard and Vercel's static-only deployment
 # (which calls this API cross-origin, see README's Deployment section) work
