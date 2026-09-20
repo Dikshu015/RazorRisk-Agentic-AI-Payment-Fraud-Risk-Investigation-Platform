@@ -40,6 +40,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - [What the evaluation proves — and what it does not](#what-the-evaluation-proves--and-what-it-does-not)
 - [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 38 numbered bugs across four phases; full write-ups in [BUGS.md](BUGS.md)
 - [Testing](#testing)
+- [CI/CD](#cicd)
 - [Tech Stack](#tech-stack)
 - [Deployment](#deployment)
   - [Production Distributed Runtime](#production-distributed-runtime)
@@ -766,6 +767,32 @@ Expected current result:
 
 ---
 
+## CI/CD
+
+RazorRisk now has a repository-level GitHub Actions pipeline.
+
+### Continuous integration
+
+On pushes to `main` and CI branches, and on pull requests targeting `main`, CI:
+
+1. installs the declared Python dependencies on Python 3.13;
+2. runs the complete `pytest -q` suite;
+3. compiles the application Python packages with `python -m compileall`;
+4. builds the application Docker image only when the test job passes.
+
+The workflow intentionally fails on a red test suite. Known golden-matrix gaps are therefore visible in CI instead of being masked by the pipeline.
+
+### Continuous delivery
+
+The CD workflow runs on `main` and can also be started manually. It builds the existing Docker image and publishes it to GitHub Container Registry with both a `latest` tag and a commit-SHA tag.
+
+The CD workflow does **not** deploy directly to a production server. Publishing the immutable image to GHCR is the current delivery boundary; deployment to a runtime environment remains an environment-specific operational step.
+
+### Current pipeline state
+
+The workflows are merged into `main`. The latest CI verification is **97 passed / 4 failed** because of the four known golden-matrix model-behavior gaps documented above. Docker build is correctly gated behind the test job.
+
+---
 ## Tech Stack
 
 | Layer | Technology | Purpose |
@@ -1392,38 +1419,47 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
 
 ---
 
-## Historical validation snapshot
+## Validation history and current verification status
 
-The following validation statements are retained verbatim from the pre-Jev project documentation. They describe
-the earlier validation state and are not the current branch's test result:
+The repository contains historical validation notes from earlier development phases. Those notes are retained as project history, but they are **not** the current release status.
 
-```text
-Current Jev-specific test file contains **21 test cases**. Runtime execution of the current GitHub HEAD has not been certified in this pass.
+### Current GitHub Actions verification
 
-The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
-distributed-production contracts.
+The merged CI workflow runs the full `pytest -q` suite on Python 3.13 before the Docker build stage.
 
-Historical validation snapshot: **75 automated tests passed** before the current Jev/resilience changes. This is not the current branch test result. Model evaluation, dashboard
-returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
-scoring plus deterministic investigation/HITL paths were exercised.
+**Latest verified CI run: 97 passed, 4 failed.**
 
-**Current Jev validation status:** 21 test cases are present in `tests/test_jev_verifier.py`; this pass did not execute the current GitHub HEAD locally.
+The four failures are deterministic golden-matrix risk-behavior regressions, not CI infrastructure failures:
 
-- Automated regression coverage across `tests/*.py`, including scoring, policy, HITL, graph freshness,
-  rate limiting, Jev verification, Jev/HITL triage safety, and every numbered regression in [BUGS.md](BUGS.md).
-  Run `pytest -q` for the current branch count.
-```
+| Scenario | Observed | Test expectation |
+|---|---:|---:|
+| Ring2 / IP proxy (`USER_RING2_1`) | 27.7 LOW | >= 40 MEDIUM |
+| Account takeover (`USER_ATO_1`) | 6.2 LOW | >= 40 MEDIUM |
+| Cold-start fraud (`USER_COLDSTART_FRAUD_1`) | 67.2 MEDIUM | >= 70 HIGH |
+| Fan-out laundering (`USER_FANOUT_LAUNDER`) | 26.3 LOW | >= 70 HIGH |
+
+These remain **known model-behavior gaps**. They have not been hidden by weakening the CI workflow, and no threshold or test assertion was changed merely to make CI green.
+
+The Jev-specific regressions exercised by the CI suite are passing; the remaining four failures are in the broader golden fraud-scenario matrix.
+
+Because the CI job failed, the Docker-build stage was correctly skipped. The CD workflow is therefore present and merged, but a passing CI run is still required before the normal container-build path is considered release-verified.
+
+### Historical validation snapshot
+
+Earlier validation passes reported smaller test counts, including the previously documented 75-test and 69-test snapshots. Those numbers describe earlier repository states and are retained for historical context only. They must not be interpreted as the current test count.
+
+The detailed engineering history remains in [BUGS.md](BUGS.md), including findings discovered before and during the Jev integration.
 
 ## Status
 
 **Working / verified:**
-- Jev-specific regression suite: **21 test cases are present** in `tests/test_jev_verifier.py`; the current GitHub HEAD requires a local `pytest -q tests/test_jev_verifier.py` execution before claiming a fresh runtime result.
-- The repository contains dedicated Jev regression coverage; the current GitHub HEAD requires a local `pytest -q` execution before claiming a fresh full-suite result.
+- Jev-specific regression suite: **21 test cases are present** in `tests/test_jev_verifier.py`; the current CI run exercises the Jev regression coverage as part of the full suite.
+- The repository contains dedicated Jev regression coverage; the latest CI run provides the current full-suite result: 97 passed and 4 failed.
 - Synthetic data pipeline, tabular + GNN + stacker training, and the evaluation contract are internally
   consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
   `tests/test_evaluation_contract.py` are built from) and `ml/models/hyperparameters.json` (the CV search
   output actually consumed by all three training functions, per Bug #28) match what's documented above.
-- Current full-suite execution status is **not certified by this pass**; run `pytest -q` at the current branch HEAD. The two previously observed golden-matrix failures remain documented as known baseline issues.
+- The latest CI full-suite result is **97 passed, 4 failed**. The four deterministic golden-matrix failures are documented above and remain known model-behavior gaps.
 - The PostgreSQL migration is real and complete across every consumer: `db/database.py`'s connection
   helper dispatches to a genuine PostgreSQL connection (via a dialect-translating wrapper) whenever
   `DATABASE_URL` is a PostgreSQL URL, and all 13 application/ML modules that touch the database go through
