@@ -55,12 +55,17 @@ raw API's request/response shape as not yet stable — expect to revisit this
 file if a field name here changes upstream.
 """
 import requests
+import time
+import uuid
 
 from config import (
     TYPESAFE_API_KEY, TYPESAFE_MODEL, TYPESAFE_API_BASE, TYPESAFE_TIMEOUT_SECONDS,
     JEV_AUTO_RESOLVE_MIN_CONFIDENCE,
+    JEV_MAX_RETRIES, JEV_RETRY_BACKOFF_SECONDS,
+    JEV_CIRCUIT_FAILURE_THRESHOLD, JEV_CIRCUIT_RESET_SECONDS,
 )
 from utils.logger import get_logger
+from infra import observability
 
 logger = get_logger("jev_verifier")
 
@@ -73,6 +78,29 @@ ACTION_CRITERIA = {
 }
 
 GROUNDING_THRESHOLD = 0.5
+SUPPORTED_ACTIONS = frozenset(ACTION_CRITERIA)
+
+_CIRCUIT_FAILURES = 0
+_CIRCUIT_OPENED_AT = 0.0
+
+def reset_circuit_breaker():
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPENED_AT
+    _CIRCUIT_FAILURES = 0; _CIRCUIT_OPENED_AT = 0.0
+    if observability.JEV_CIRCUIT_OPEN is not None: observability.JEV_CIRCUIT_OPEN.set(0)
+
+def _circuit_open():
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPENED_AT
+    if _CIRCUIT_OPENED_AT and time.monotonic() - _CIRCUIT_OPENED_AT >= JEV_CIRCUIT_RESET_SECONDS: reset_circuit_breaker()
+    return bool(_CIRCUIT_OPENED_AT)
+
+def _record_failure():
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPENED_AT
+    _CIRCUIT_FAILURES += 1
+    if _CIRCUIT_FAILURES >= max(1, JEV_CIRCUIT_FAILURE_THRESHOLD):
+        _CIRCUIT_OPENED_AT = time.monotonic()
+        if observability.JEV_CIRCUIT_OPEN is not None: observability.JEV_CIRCUIT_OPEN.set(1)
+
+def _record_success(): reset_circuit_breaker()
 
 
 def is_available() -> bool:
@@ -80,20 +108,33 @@ def is_available() -> bool:
 
 
 def _call_systemone(state: str, questions: dict) -> dict:
-    resp = requests.post(
-        f"{TYPESAFE_API_BASE}/v1/systemone",
-        headers={"Authorization": f"Bearer {TYPESAFE_API_KEY}", "Content-Type": "application/json"},
-        json={"model": TYPESAFE_MODEL, "state": state, "questions": questions},
-        timeout=TYPESAFE_TIMEOUT_SECONDS,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
+    if _circuit_open():
+        if observability.JEV_FAILURES is not None: observability.JEV_FAILURES.labels(reason="circuit_open").inc()
+        raise RuntimeError("Jev circuit breaker is open; verification temporarily unavailable.")
+    attempts = max(0, JEV_MAX_RETRIES) + 1
+    for attempt in range(attempts):
+        try:
+            resp = requests.post(f"{TYPESAFE_API_BASE}/v1/systemone", headers={"Authorization": f"Bearer {TYPESAFE_API_KEY}", "Content-Type": "application/json"}, json={"model": TYPESAFE_MODEL, "state": state, "questions": questions}, timeout=TYPESAFE_TIMEOUT_SECONDS)
+            if not 200 <= resp.status_code < 300: resp.raise_for_status()
+            data = resp.json(); _record_success(); return data
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+        except requests.HTTPError as exc:
+            if not (exc.response is not None and (exc.response.status_code == 429 or exc.response.status_code >= 500)):
+                raise RuntimeError(f"Jev HTTP request failed: {exc}") from exc
+            last_exc = exc
+        if attempt < attempts - 1:
+            if observability.JEV_RETRIES is not None: observability.JEV_RETRIES.inc()
+            time.sleep(JEV_RETRY_BACKOFF_SECONDS * (2 ** attempt))
+    _record_failure()
+    if observability.JEV_FAILURES is not None: observability.JEV_FAILURES.labels(reason="transient_exhausted").inc()
+    raise RuntimeError(f"Jev request failed after {attempts} attempt(s): {last_exc}") from last_exc
 
 def verify_investigation(txn_payload: dict, risk_summary: dict, evidence: dict,
                           fraud_hypothesis: str, recommended_action: str) -> dict:
-    """Returns a verification dict; raises on any failure (see module docstring)."""
+    """Return a verification result; provider failures remain fail-open to the caller."""
     if not TYPESAFE_API_KEY:
+        if observability.JEV_UNAVAILABLE is not None: observability.JEV_UNAVAILABLE.inc()
         raise RuntimeError("TYPESAFE_API_KEY is not configured.")
 
     evidence_state = {
@@ -114,7 +155,14 @@ def verify_investigation(txn_payload: dict, risk_summary: dict, evidence: dict,
             }
         },
     )
-    action_answer = action_resp["answers"]["recommended_action"]
+    try:
+        action_answer = action_resp["answers"]["recommended_action"]
+        independent_action = action_answer["choice"]
+        if independent_action not in SUPPORTED_ACTIONS: raise ValueError(f"unsupported action: {independent_action!r}")
+        confidence = float(action_answer.get("confidence", 0.0) or 0.0)
+        if not 0.0 <= confidence <= 1.0: raise ValueError(f"invalid action confidence: {confidence!r}")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Malformed Jev action response: {exc}") from exc
 
     grounding_resp = _call_systemone(
         state=f"Evidence:
@@ -133,17 +181,21 @@ Investigator's fraud hypothesis:
             }
         },
     )
-    grounded_probability = grounding_resp["answers"]["hypothesis_grounded"]["noul"]
+    try:
+        grounded_probability = float(grounding_resp["answers"]["hypothesis_grounded"]["noul"])
+        if not 0.0 <= grounded_probability <= 1.0: raise ValueError(f"invalid grounding probability: {grounded_probability!r}")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Malformed Jev grounding response: {exc}") from exc
 
-    actions_agree = action_answer["choice"] == recommended_action
+    actions_agree = independent_action == recommended_action
     is_grounded = grounded_probability >= GROUNDING_THRESHOLD
     verification_flag = "CONSISTENT" if (actions_agree and is_grounded) else "REVIEW_RECOMMENDED"
-    confidence = action_answer.get("confidence") or 0.0
     eligible_for_auto_resolve = verification_flag == "CONSISTENT" and confidence >= JEV_AUTO_RESOLVE_MIN_CONFIDENCE
 
     result = {
+        "jev_request_id": f"JEV_{uuid.uuid4().hex[:12]}",
         "jev_model": action_resp.get("model", TYPESAFE_MODEL),
-        "independent_action": action_answer["choice"],
+        "independent_action": independent_action,
         "independent_action_confidence": confidence,
         "independent_action_probabilities": action_answer.get("probabilities"),
         "actions_agree": actions_agree,
@@ -153,6 +205,11 @@ Investigator's fraud hypothesis:
         "eligible_for_auto_resolve": eligible_for_auto_resolve,
     }
 
+    if observability.JEV_REQUESTS is not None: observability.JEV_REQUESTS.labels(outcome="success").inc()
+    if verification_flag == "CONSISTENT" and observability.JEV_CONSISTENT is not None: observability.JEV_CONSISTENT.inc()
+    if verification_flag == "REVIEW_RECOMMENDED" and observability.JEV_REVIEW_RECOMMENDED is not None: observability.JEV_REVIEW_RECOMMENDED.inc()
+    if not actions_agree and observability.JEV_ACTION_DISAGREEMENTS is not None: observability.JEV_ACTION_DISAGREEMENTS.inc()
+    if not is_grounded and observability.JEV_GROUNDING_FAILURES is not None: observability.JEV_GROUNDING_FAILURES.inc()
     if verification_flag == "REVIEW_RECOMMENDED":
         logger.warning(
             f"[Jev] Flagged for review — investigator picked '{recommended_action}', "
