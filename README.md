@@ -279,6 +279,36 @@ The investigation layer is separate from scoring. Deterministic tools collect st
 
 An LLM, when configured, interprets this evidence instead of inventing the underlying risk measurements. A deterministic fallback is available when no external model provider is configured.
 
+### 7.5. Optional Jev verification layer
+
+RazorRisk can run an **opt-in Jev (TypeSafe System One) verification pass** after the investigation agent has produced its hypothesis and recommended action. Jev is deliberately outside the fraud-scoring hot path: the XGBoost + GraphSAGE + learned-stacker score is unchanged whether Jev is enabled or disabled.
+
+The verification pass performs two independent checks over the deterministic evidence already gathered by the investigation agent:
+
+1. **Independent action check** — Jev selects one action from the same five-action vocabulary used by the investigator without being shown the investigator's answer.
+2. **Hypothesis-grounding check** — Jev checks whether the investigator's fraud hypothesis is supported by the supplied evidence rather than containing invented counts, IDs, or other specific claims.
+
+The result is one of:
+
+- `CONSISTENT` — independent action agrees and the hypothesis grounding score clears the configured threshold.
+- `REVIEW_RECOMMENDED` — the independent action disagrees or the hypothesis grounding check is below threshold.
+- no verification result — Jev is disabled, unconfigured, or unavailable; the investigation still completes.
+
+Jev is **not** the fraud detector and does not replace the investigator's action. When a pending HITL review exists, `CONSISTENT` is additionally eligible for automatic triage only when the independent action confidence is at least `JEV_AUTO_RESOLVE_MIN_CONFIDENCE` (default `0.85`) **and none of the mandatory-human reasons are present**. Mandatory-human reasons remain human-controlled regardless of model agreement.
+
+The dashboard exposes a process-local **Jev verification** toggle. It is off by default and requires `TYPESAFE_API_KEY`. The toggle resets to off after a process restart. Configure optional settings in `.env`:
+
+```env
+TYPESAFE_API_KEY=
+TYPESAFE_API_BASE=https://api.typesafe.ai
+TYPESAFE_MODEL=jev-latest
+TYPESAFE_TIMEOUT_SECONDS=5
+JEV_AUTO_RESOLVE_MIN_CONFIDENCE=0.85
+```
+
+Jev failures are fail-open for the investigation report: timeout, network, non-2xx, or malformed responses are logged and the report is returned without the Jev section. This keeps the verification layer from becoming a payment-decision dependency.
+
+
 ### 8. Auditable model decomposition
 
 Transaction history and risk-engine logs expose:
@@ -663,14 +693,16 @@ just what the fix was — are in [BUGS.md](BUGS.md).** A few of the more structu
 | 34 | Investigations broke entirely with Redis down | `POST /enqueue` always 503'd once the dashboard stopped calling the old sync endpoint — no non-Redis fallback existed for local dev |
 | 35 | Missing `sqlalchemy` dependency | The Postgres-era `read_sql_query()` (used by real training scripts) needed it; a clean install would crash on the first training run |
 | 36 | Quick Start silently assumed Postgres | `DATABASE_URL` defaults to a local Postgres URL with no documented SQLite fallback for a manual, no-Docker run |
+| 37 | Jev auto-resolution race | Atomic `PENDING` check prevents a Jev write from overwriting a human resolution |
+| 38 | Unvalidated Jev response | Action allowlist and 0–1 probability validation fail safely on upstream schema drift |
 
-Current regression suite: **75 tests passed.**
+The Jev branch adds dedicated verifier, HITL-triage, and failure-contract tests; run `pytest -q` for the current exact count.
 
 ---
 
 ## Final Production Validation
 
-The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
+The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, Jev verification, and
 distributed-production contracts. The complete bug ledger — including this validation pass — now lives in
 [BUGS.md](BUGS.md).
 
@@ -687,7 +719,7 @@ flowchart TB
     AI --> AUDIT[Reports + audit logs]
 ```
 
-Final local validation result: **75 automated tests passed**, model evaluation completed, dashboard
+Final local validation result is tracked by the branch's `pytest -q` run below; model evaluation, dashboard,
 returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
 scoring plus deterministic investigation/HITL paths were exercised. Redis-backed queue/rate-limiter live
 execution was blocked only because the validation environment has no Redis server/package; see
@@ -718,6 +750,8 @@ The test suite covers:
 - regression bugs
 - evaluation contracts
 - API behavior
+- Jev verification parsing, agreement, grounding, and failure handling
+- Jev/HITL auto-resolution safety and race handling
 
 Run:
 
@@ -727,7 +761,7 @@ pytest -q
 
 Expected current result:
 
-**75 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–29 and the production-hardening pass did).
+**Run `pytest -q` locally. The exact count is intentionally not hard-coded because Jev integration adds regression coverage as the branch evolves.**
 
 ---
 
@@ -1116,6 +1150,7 @@ For a short technical demo:
 | `/api/v1/investigations/{id}` | GET | Fetch a saved investigation report |
 | `/api/v1/investigations/agent-status` | GET | Which provider/mode is actually active right now |
 | `/api/v1/investigations/agent-mode` | POST | Force an agent mode override |
+| `/api/v1/investigations/jev-mode` | POST | Enable/disable the optional Jev verification pass |
 | `/api/v1/hitl/queue` | GET | Pending human-review queue |
 | `/api/v1/hitl/review/{review_id}` | POST | Resolve a pending review (`APPROVE` / `HOLD` / `BLOCK`) |
 | `/api/v1/hitl/transaction/{transaction_id}` | GET | Look up the review record tied to a specific transaction |
@@ -1138,7 +1173,46 @@ openai          — force OpenAI
 deterministic   — force the rule-based fallback, regardless of configured keys
 ```
 
-The override is held in memory and resets to `auto` on restart. Every investigation report records the mode that *actually ran* — including `deterministic_fallback` when a configured provider was attempted but failed — so the report never implies an LLM call happened when it didn't.
+The override is held in memory and resets to `auto` on restart.
+
+### Jev verification control
+
+`GET /api/v1/investigations/agent-status` also reports:
+
+- `jev_configured` — whether `TYPESAFE_API_KEY` is available to the process.
+- `jev_verification_enabled` — whether the process-local Jev toggle is currently on.
+
+`POST /api/v1/investigations/jev-mode` accepts:
+
+```json
+{"enabled": true}
+```
+
+The setting is process-local and defaults to `false` after restart. It does not alter model scoring. A Jev verification result is included in the investigation response under `jev_verification` and is appended to the human-readable report when the verification call succeeds.
+
+---
+
+## Jev Benchmarking
+
+The repository includes `tests/benchmarks/benchmark_jev.py` for a direct **same-transaction, same-investigator** comparison of investigation latency with Jev disabled versus Jev enabled.
+
+Run the baseline now, without an API key:
+
+```bash
+python tests/benchmarks/benchmark_jev.py --runs 3
+```
+
+Then, after configuring `TYPESAFE_API_KEY`, rerun the same command. The script will populate the `With Jev` row and report median/p95 latency plus incremental median overhead.
+
+### Benchmark results
+
+| Configuration | Median latency | P95 latency | Runs | Status |
+|---|---:|---:|---:|---|
+| Without Jev | **38.60 ms** | **136.85 ms** | 3 | Baseline measured locally on 2026-09-20 |
+| With Jev | **[TO FILL AFTER API KEY]** | **[TO FILL AFTER API KEY]** | 3 | Requires `TYPESAFE_API_KEY` |
+
+These are **latency/operational benchmarks**, not fraud-detection accuracy claims. Accuracy or review-quality claims require an independently labeled evaluation set and should be reported separately.
+ Every investigation report records the mode that *actually ran* — including `deterministic_fallback` when a configured provider was attempted but failed — so the report never implies an LLM call happened when it didn't.
 
 ---
 
@@ -1316,6 +1390,28 @@ The stacker combines *learned* tabular and graph signals. Velocity thresholds an
 - [scikit-learn precision/recall definitions](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.precision_recall_curve.html)
 
 ---
+
+## Historical validation snapshot
+
+The following validation statements are retained verbatim from the pre-Jev project documentation. They describe
+the earlier validation state and are not the current branch's test result:
+
+```text
+Current regression suite: **75 tests passed.**
+
+The final validation covers the backend, frontend, ML, graph, deterministic AI/HITL, and
+distributed-production contracts.
+
+Final local validation result: **75 automated tests passed**, model evaluation completed, dashboard
+returned HTTP 200, both dashboard JavaScript files passed syntax validation, and live low-risk/high-risk
+scoring plus deterministic investigation/HITL paths were exercised.
+
+**75 tests passed** (verify locally with `pytest -q` — the exact count moves whenever a bug fix adds its own regression test, as Bugs 18–29 and the production-hardening pass did).
+
+- Automated regression coverage across `tests/*.py`, including scoring, policy, HITL, graph freshness,
+  rate limiting, Jev verification, Jev/HITL triage safety, and every numbered regression in [BUGS.md](BUGS.md).
+  Run `pytest -q` for the current branch count.
+```
 
 ## Status
 
