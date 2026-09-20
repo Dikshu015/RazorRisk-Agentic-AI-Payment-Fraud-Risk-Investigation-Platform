@@ -38,7 +38,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - [Hyperparameter Selection (CV)](#hyperparameter-selection-cv)
 - [Current model/data contract](#current-modeldata-contract)
 - [What the evaluation proves — and what it does not](#what-the-evaluation-proves--and-what-it-does-not)
-- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 38 numbered bugs across four phases; full write-ups in [BUGS.md](BUGS.md)
+- [Engineering bugs discovered and fixed](#engineering-bugs-discovered-and-fixed) — 40 numbered bugs across five phases; full write-ups in [BUGS.md](BUGS.md)
 - [Testing](#testing)
 - [CI/CD](#cicd)
 - [Tech Stack](#tech-stack)
@@ -69,7 +69,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
 - **Evidence-grounded investigation** — four deterministic tools (`GraphTool`, `TransactionHistoryTool`, `DeviceRiskTool`, `FraudModelTool`) compute the underlying evidence; an LLM, when available, interprets it rather than inventing it.
 - **One coherent synthetic evaluation domain** — both XGBoost and GraphSAGE are trained and evaluated from the same RazorRisk synthetic transaction population, using complementary transaction-level and relational feature sets; the learned stacker is trained on paired predictions from those same transactions.
 - **A golden adversarial test matrix** — `tests/GOLDEN_TEST_MATRIX.md` checks the trained model against dozens of named fraud-ring and benign-look-alike scenarios (hostel Wi-Fi, carrier-NAT, festival sales, family devices) and discloses, by name, the cases that are still gaps rather than claiming full coverage.
-- **A published bug history, not just a feature list** — 38 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
+- **A published bug history, not just a feature list** — 40 concrete, verified engineering bugs with what broke, how it was found, and why the fix is defensible — see the [Engineering bugs](#engineering-bugs-discovered-and-fixed) section and [PROJECT_WORKFLOW.md](PROJECT_WORKFLOW.md).
 - **One shared production data layer** — PostgreSQL/Supabase is the production source of truth for transactions, risk scores, HITL state, and investigations; SQLite is retained only as an explicit test/local fallback.
 
 ---
@@ -763,7 +763,7 @@ pytest -q
 
 Expected current result:
 
-**Run `pytest -q` locally. The exact count is intentionally not hard-coded because Jev integration adds regression coverage as the branch evolves.**
+**Latest verified result: 98 passed.** The count may change when new regression coverage is added; run `pytest -q` locally for the current checkout.
 
 ---
 
@@ -780,17 +780,17 @@ On pushes to `main` and CI branches, and on pull requests targeting `main`, CI:
 3. compiles the application Python packages with `python -m compileall`;
 4. builds the application Docker image only when the test job passes.
 
-The workflow intentionally fails on a red test suite. Known golden-matrix gaps are therefore visible in CI instead of being masked by the pipeline.
+The workflow intentionally fails on a red test suite. Golden-matrix assertions remain blocking tests; the initial CI failures were traced to reproducibility issues documented as Bugs #39–40.
 
 ### Continuous delivery
 
-The CD workflow runs on `main` and can also be started manually. It builds the existing Docker image and publishes it to GitHub Container Registry with both a `latest` tag and a commit-SHA tag.
+The CD workflow runs automatically after a successful CI workflow on `main`. It builds the existing Docker image and publishes it to GitHub Container Registry with both a `latest` tag and a commit-SHA tag.
 
 The CD workflow does **not** deploy directly to a production server. Publishing the immutable image to GHCR is the current delivery boundary; deployment to a runtime environment remains an environment-specific operational step.
 
 ### Current pipeline state
 
-The workflows are merged into `main`. The latest CI verification is **97 passed / 4 failed** because of the four known golden-matrix model-behavior gaps documented above. Docker build is correctly gated behind the test job.
+The workflows are merged into `main`. The latest verified pipeline is **98/98 tests passed**, Python compilation passed, Docker build passed, and CD successfully published the image to GHCR. Docker build and CD are gated by successful CI.
 
 ---
 ## Tech Stack
@@ -1446,20 +1446,20 @@ Because the CI job failed, the Docker-build stage was correctly skipped. The CD 
 
 ### Historical validation snapshot
 
-Earlier validation passes reported smaller test counts, including the previously documented 75-test and 69-test snapshots. Those numbers describe earlier repository states and are retained for historical context only. They must not be interpreted as the current test count.
+Earlier validation passes reported smaller test counts, including 75-test and 69-test snapshots. Those numbers describe earlier repository states and are retained for historical context only. They are not the current test count.
 
-The detailed engineering history remains in [BUGS.md](BUGS.md), including findings discovered before and during the Jev integration.
+The CI rollout subsequently exposed reproducibility issues in the golden-matrix bootstrap. Those findings and fixes are documented as Bugs #39–40 in BUGS.md.
 
 ## Status
 
 **Working / verified:**
 - Jev-specific regression suite: **21 test cases are present** in `tests/test_jev_verifier.py`; the current CI run exercises the Jev regression coverage as part of the full suite.
-- The repository contains dedicated Jev regression coverage; the latest CI run provides the current full-suite result: 97 passed and 4 failed.
+- The latest CI full-suite result is **98 passed, 0 failed**.
 - Synthetic data pipeline, tabular + GNN + stacker training, and the evaluation contract are internally
   consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
   `tests/test_evaluation_contract.py` are built from) and `ml/models/hyperparameters.json` (the CV search
   output actually consumed by all three training functions, per Bug #28) match what's documented above.
-- The latest CI full-suite result is **97 passed, 4 failed**. The four deterministic golden-matrix failures are documented above and remain known model-behavior gaps.
+- The latest CI full-suite result is **98 passed, 0 failed**. The four golden-matrix failures that appeared during the initial CI rollout were traced to reproducibility/test-fixture issues and fixed as Bugs #39–40.
 - The PostgreSQL migration is real and complete across every consumer: `db/database.py`'s connection
   helper dispatches to a genuine PostgreSQL connection (via a dialect-translating wrapper) whenever
   `DATABASE_URL` is a PostgreSQL URL, and all 13 application/ML modules that touch the database go through
@@ -1470,7 +1470,7 @@ The detailed engineering history remains in [BUGS.md](BUGS.md), including findin
   `docker-compose.yml`'s dedicated `investigation-worker` service. Both now degrade gracefully instead of
   hard-failing when Redis is unavailable and `REDIS_REQUIRED=false` (the default) — see Bug #34.
 
-**Known follow-ups (found during review, not yet fixed):**
+**Known follow-ups (not blocking CI):**
 - The PostgreSQL path has been verified by static code tracing but not yet execution-verified against a
   live PostgreSQL/Supabase instance — run the test suite and demo script once against a real instance
   before calling the migration release-verified.
@@ -1482,7 +1482,6 @@ The detailed engineering history remains in [BUGS.md](BUGS.md), including findin
 - `ml/hyperparameter_search.py::main()` computes a full GNN cross-validation pass through a `... if False
   else None` expression that is immediately discarded and recomputed on the next line — harmless, but
   doubles the GNN CV cost for no reason. Safe to delete.
-- Four golden-matrix cases currently fail the CI contract: `USER_RING2_1`, `USER_ATO_1`, `USER_COLDSTART_FRAUD_1`, and `USER_FANOUT_LAUNDER`. The observed scores and expected bars are listed in [Current GitHub Actions verification](#current-github-actions-verification). These are model-behavior findings, not CI infrastructure failures, and remain open rather than being hidden by changing the tests.
 
 
 ## Jev Verification Layer — Integration Status
