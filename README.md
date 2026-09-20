@@ -3,7 +3,7 @@
 [**Live demo,**](https://razorrisk-agentic-ai-payment-fraud-risk.antideploy.com/dashboard/)
 [**Demo video**](https://drive.google.com/file/d/1pactgyj_zuM1nKsdecU7-bIHsfQ-psuq/view?usp=drive_link)
 
-> **A production-inspired AI risk prototype that combines transaction-level machine learning, graph-based fraud-community signals, calibrated score fusion, security guardrails, and human-in-the-loop investigation.**
+> **A production-inspired AI risk prototype that combines transaction-level machine learning, graph-based fraud-community signals, calibrated score fusion, security guardrails, human-in-the-loop investigation, and an independent Jev (TypeSafe System One) verification layer.**
 
 RazorRisk treats payment fraud as more than a row-level classification problem. A transaction can look normal in isolation while its user is connected to other risky users through shared devices or IP addresses. The platform therefore combines **tabular transaction evidence** with **relational graph evidence**, then passes the result through an explicit risk-policy and investigation workflow.
 
@@ -24,6 +24,7 @@ The project is designed to demonstrate the engineering decisions behind an AI Ri
   - [5. Security guardrails](#5-security-guardrails)
   - [6. Real human-in-the-loop workflow](#6-real-human-in-the-loop-workflow)
   - [7. Evidence-grounded investigation](#7-evidence-grounded-investigation)
+  - [7.5. Optional Jev verification layer](#75-optional-jev-verification-layer)
   - [8. Auditable model decomposition](#8-auditable-model-decomposition)
 - [End-to-end workflow](#end-to-end-workflow)
   - [Transaction flow](#transaction-flow--data-moving-through-the-system)
@@ -1416,7 +1417,7 @@ scoring plus deterministic investigation/HITL paths were exercised.
 ## Status
 
 **Working / verified:**
-- Jev-specific regression suite: **17 tests passed** (`pytest -q tests/test_jev_verifier.py`).
+- Jev-specific regression suite: **21 test cases are present** in `tests/test_jev_verifier.py`; the current GitHub HEAD requires a local `pytest -q tests/test_jev_verifier.py` execution before claiming a fresh runtime result.
 - The repository contains dedicated Jev regression coverage; the current GitHub HEAD requires a local `pytest -q` execution before claiming a fresh full-suite result.
 - Synthetic data pipeline, tabular + GNN + stacker training, and the evaluation contract are internally
   consistent — `ml/models/aggregator_eval.json` (what both the evaluation table above and
