@@ -85,6 +85,11 @@ _CIRCUIT_LOCK = threading.Lock()
 _CIRCUIT_FAILURES = 0
 _CIRCUIT_OPENED_AT = 0.0
 
+def is_available() -> bool:
+    """Whether Jev is configured and available for an attempted verification."""
+    return bool(TYPESAFE_API_KEY)
+
+
 def reset_circuit_breaker():
     global _CIRCUIT_FAILURES, _CIRCUIT_OPENED_AT
     with _CIRCUIT_LOCK:
@@ -122,7 +127,12 @@ def _call_systemone(state: str, questions: dict) -> dict:
     for attempt in range(attempts):
         try:
             resp = requests.post(f"{TYPESAFE_API_BASE}/v1/systemone", headers={"Authorization": f"Bearer {TYPESAFE_API_KEY}", "Content-Type": "application/json"}, json={"model": TYPESAFE_MODEL, "state": state, "questions": questions}, timeout=TYPESAFE_TIMEOUT_SECONDS)
-            if not 200 <= resp.status_code < 300: resp.raise_for_status()
+            status_code = getattr(resp, "status_code", None)
+            if isinstance(status_code, int) and not 200 <= status_code < 300:
+                error = requests.HTTPError(f"HTTP {status_code}", response=resp)
+                if status_code == 429 or status_code >= 500:
+                    raise error
+                raise RuntimeError(f"Jev HTTP request failed: HTTP {status_code}") from error
             data = resp.json(); _record_success(); return data
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_exc = exc
@@ -172,11 +182,7 @@ def verify_investigation(txn_payload: dict, risk_summary: dict, evidence: dict,
         raise RuntimeError(f"Malformed Jev action response: {exc}") from exc
 
     grounding_resp = _call_systemone(
-        state=f"Evidence:
-{evidence_state}
-
-Investigator's fraud hypothesis:
-{fraud_hypothesis}",
+        state=f"Evidence:\n{evidence_state}\n\nInvestigator's fraud hypothesis:\n{fraud_hypothesis}",
         questions={
             "hypothesis_grounded": {
                 "type": "noul",

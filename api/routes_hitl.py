@@ -60,6 +60,26 @@ _ACTION_TO_HITL_DECISION = {
     "APPROVE_WITH_VERIFICATION": "APPROVE",
 }
 
+# These reasons represent ambiguity, conflicting evidence, or mandatory
+# dual-control review and therefore cannot be bypassed by Jev agreement.
+_MANDATORY_HUMAN_REASONS = {
+    "MODEL_UNCERTAINTY",
+    "MODEL_DISAGREEMENT",
+    "EVIDENCE_CONFLICT",
+    "HIGH_IMPACT",
+}
+
+
+def jev_auto_resolve_eligible(risk: dict, investigation: dict) -> bool:
+    """Return whether Jev may remove an already-queued HITL review."""
+    if not risk.get("hitl_required"):
+        return False
+    reasons = set(risk.get("review_reasons") or [])
+    if reasons & _MANDATORY_HUMAN_REASONS:
+        return False
+    verification = investigation.get("jev_verification") or {}
+    return bool(verification.get("eligible_for_auto_resolve"))
+
 
 def auto_resolve_review(transaction_id: str, decision_action: str, rationale: str,
                          resolved_by: str = "jev_auto_triage") -> str | None:
