@@ -1482,19 +1482,16 @@ The detailed engineering history remains in [BUGS.md](BUGS.md), including findin
 - `ml/hyperparameter_search.py::main()` computes a full GNN cross-validation pass through a `... if False
   else None` expression that is immediately discarded and recomputed on the next line — harmless, but
   doubles the GNN CV cost for no reason. Safe to delete.
-- Two disclosed detection gaps remain open by design, currently affecting **both** flagship ring
-  scenarios rather than only `USER_RING2_1` as in the original Bug #29 write-up — see
-  [Stacker effect](#stacker-effect) above for the current numbers and [Bug #29 in BUGS.md](BUGS.md) for
-  why this wasn't papered over with a lucky threshold or a cherry-picked retrain.
+- Four golden-matrix cases currently fail the CI contract: `USER_RING2_1`, `USER_ATO_1`, `USER_COLDSTART_FRAUD_1`, and `USER_FANOUT_LAUNDER`. The observed scores and expected bars are listed in [Current GitHub Actions verification](#current-github-actions-verification). These are model-behavior findings, not CI infrastructure failures, and remain open rather than being hidden by changing the tests.
 
 
-## Jev Verification Layer — Integrated
+## Jev Verification Layer — Integration Status
 
 > **Jev is fully integrated into RazorRisk as an independent post-investigation verification layer.** It is not a planned/future feature. The production code path, API integration, resilience controls, HITL automation, observability, tests, and architecture diagrams are all included in this repository.
 
 **Flow:** Fraud scoring → Agentic investigation → **Jev independent verification** → controlled HITL auto-resolution / human review.
 
-## Jev Verification Layer
+## Jev Verification Layer — Detailed Behavior
 
 RazorRisk includes an optional independent **Jev (TypeSafe System One)** verification pass after an investigation has been generated. Jev is deliberately outside the fraud-scoring hot path: it does not change XGBoost/GNN/stacker scoring and cannot block the underlying investigation from completing.
 
