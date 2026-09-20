@@ -53,8 +53,7 @@ The FastAPI application is automatically instrumented when the OpenTelemetry pac
 
 ## Jev verification signals
 
-Jev currently uses the existing investigation/audit logging channels rather than
-introducing a separate Prometheus metric family. Search the agent investigation
+Jev exposes dedicated Prometheus counters, latency, retry, disagreement, grounding, unavailable, auto-resolution, and circuit-breaker metrics. Search the agent investigation
 log for `[Jev]` entries to distinguish:
 
 - verification consistency;
