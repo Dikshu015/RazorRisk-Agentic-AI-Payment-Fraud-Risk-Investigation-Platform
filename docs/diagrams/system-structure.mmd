@@ -24,7 +24,7 @@ flowchart TB
     subgraph Investigation[Investigation and Resolution]
         EVID[Deterministic evidence tools]
         LLM[Optional LLM investigation]
-        JEV[Optional Jev verification]
+        JEV[Optional Jev verification<br/>retry + circuit breaker]
         HITL[Human review queue]
         AUTO[Jev auto-triage<br/>eligible cases only]
     end
