@@ -2,9 +2,10 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from agent.graph_agent import investigation_agent
-from agent import llm_investigator, mode_state
+from agent import llm_investigator, jev_verifier, mode_state
 from ml.risk_aggregator import calculate_composite_risk_score, HIGH_RISK_THRESHOLD
-from ml.decision_policy import apply_decision_policy
+from ml.decision_policy import apply_decision_policy, MANDATORY_HUMAN_REASONS
+from api.routes_hitl import auto_resolve_review
 from db.database import get_raw_sqlite_connection
 from utils.logger import get_logger
 from infra.rate_limit import enforce_rate_limit
@@ -21,6 +22,10 @@ _PROVIDER_LABELS = {"anthropic": "Anthropic", "groq": "Groq", "openai": "OpenAI"
 
 class AgentModeRequest(BaseModel):
     mode: str  # "auto" | "anthropic" | "groq" | "openai" | "deterministic"
+
+
+class JevModeRequest(BaseModel):
+    enabled: bool
 
 
 @router.get("/agent-status")
@@ -55,6 +60,8 @@ def get_agent_status():
         "active_provider": active_provider,
         "active_label": active_label,
         "modes": modes,
+        "jev_configured": jev_verifier.is_available(),
+        "jev_verification_enabled": mode_state.get_jev_verification_enabled(),
     }
 
 
@@ -68,6 +75,14 @@ def set_agent_status(req: AgentModeRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     logger.info(f"Agent mode override set to '{new_mode}'.")
+    return get_agent_status()
+
+
+@router.post("/jev-mode")
+def set_jev_mode(req: JevModeRequest):
+    """Toggles the Jev verification pass on or off for subsequent investigations."""
+    enabled = mode_state.set_jev_verification_enabled(req.enabled)
+    logger.info(f"Jev verification toggled to {enabled}.")
     return get_agent_status()
 
 @router.post("/run/{transaction_id}")
@@ -144,6 +159,30 @@ async def run_investigation(request: Request, transaction_id: str, force: bool =
         }
 
     investigation_res = investigation_agent.investigate(txn_payload, risk_res)
+
+    # Jev-driven HITL triage. Mandatory-human reasons always remain human-reviewed.
+    review_reasons = set(policy_res.get("review_reasons", []))
+    jev_result = investigation_res.get("jev_verification")
+    if (
+        policy_res.get("hitl_required")
+        and jev_result
+        and jev_result.get("eligible_for_auto_resolve")
+        and not (review_reasons & MANDATORY_HUMAN_REASONS)
+    ):
+        resolved_id = auto_resolve_review(
+            transaction_id,
+            decision_action=investigation_res["recommended_action"],
+            rationale=(
+                f"Auto-resolved: Jev and the investigator independently agreed on "
+                f"'{investigation_res['recommended_action']}' "
+                f"(confidence={jev_result['independent_action_confidence']:.0%}, "
+                f"hypothesis grounding={jev_result['hypothesis_grounded_probability']:.0%}). "
+                f"No mandatory-human-review reason was present."
+            ),
+        )
+        investigation_res["hitl_auto_resolved_review_id"] = resolved_id
+        if resolved_id:
+            logger.info(f"HITL review {resolved_id} for {transaction_id} auto-resolved via Jev verification.")
 
     # Save to database
     cursor.execute("""
