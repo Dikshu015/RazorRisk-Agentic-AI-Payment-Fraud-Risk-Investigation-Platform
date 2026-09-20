@@ -17,9 +17,10 @@ import time
 from infra.jobs import read_job, reclaim_job, ack_job, requeue_job, get_job, update_job
 from db.database import get_raw_sqlite_connection
 from ml.risk_aggregator import calculate_composite_risk_score
-from ml.decision_policy import apply_decision_policy
+from ml.decision_policy import apply_decision_policy, MANDATORY_HUMAN_REASONS
 from ml.risk_aggregator import HIGH_RISK_THRESHOLD
 from agent.graph_agent import investigation_agent
+from api.routes_hitl import auto_resolve_review
 from utils.logger import get_logger
 from infra.observability import INVESTIGATION_TOTAL, INVESTIGATION_LATENCY, INVESTIGATION_RETRIES, span
 
@@ -60,6 +61,31 @@ def execute_job_sync(job: dict) -> dict:
     if not needs and not job.get("force", False):
         return {"transaction_id": txn_id, "investigation_skipped": True, "risk_evaluation": risk, "policy_evaluation": policy}
     result = investigation_agent.investigate(payload, risk)
+
+    # Mirrors the API endpoint's Jev-driven HITL auto-resolution.
+    review_reasons = set(policy.get("review_reasons", []))
+    jev_result = result.get("jev_verification")
+    if (
+        policy.get("hitl_required")
+        and jev_result
+        and jev_result.get("eligible_for_auto_resolve")
+        and not (review_reasons & MANDATORY_HUMAN_REASONS)
+    ):
+        resolved_id = auto_resolve_review(
+            txn_id,
+            decision_action=result["recommended_action"],
+            rationale=(
+                f"Auto-resolved: Jev and the investigator independently agreed on "
+                f"'{result['recommended_action']}' "
+                f"(confidence={jev_result['independent_action_confidence']:.0%}, "
+                f"hypothesis grounding={jev_result['hypothesis_grounded_probability']:.0%}). "
+                f"No mandatory-human-review reason was present."
+            ),
+        )
+        result["hitl_auto_resolved_review_id"] = resolved_id
+        if resolved_id:
+            logger.info(f"HITL review {resolved_id} for {txn_id} auto-resolved via Jev verification.")
+
     conn = get_raw_sqlite_connection()
     try:
         conn.execute("""
